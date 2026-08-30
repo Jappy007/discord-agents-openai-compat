@@ -40,10 +40,13 @@ building, memory, episodes) is unaware of which provider is in use.
   memory works identically on either provider.
 - **Web search / web fetch** — Anthropic's native server tools are replaced
   under `openai_compatible` with ordinary function tools
-  (`tools/client_web_tools.py`) backed by the Brave Search API. Requires
-  `BRAVE_SEARCH_API_KEY` in `.env`; if `config.api.web_search.enabled` is
-  true but the key is missing, the tools are still offered but every call
-  returns a clear error rather than crashing.
+  (`tools/client_web_tools.py`). Search uses DuckDuckGo via the `ddgs`
+  package - no API key, account, or card needed. It's a scrape of
+  DuckDuckGo/Bing's public result pages rather than an official API, so
+  it's less reliable than a paid provider (can break if their markup
+  changes, or get rate-limited under heavy use) - that's the trade-off for
+  zero setup. Want something sturdier later, swap `execute_web_search` in
+  `tools/client_web_tools.py` for a paid provider (Brave, Tavily, SerpAPI).
 
 ## What's disabled under `LLM_PROVIDER=openai_compatible`
 
