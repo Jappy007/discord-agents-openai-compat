@@ -302,20 +302,14 @@ class ReactiveEngine:
 
         # Web search: all-or-nothing (no rate limiting). Native web search is
         # Anthropic's server tool; on LLM_PROVIDER=openai_compatible this
-        # instead uses client-side web_search/web_fetch tools backed by the
-        # Brave Search API - see tools/client_web_tools.py.
+        # instead uses client-side web_search/web_fetch tools backed by
+        # DuckDuckGo (no key required) - see tools/client_web_tools.py.
         self.web_search_enabled = config.api.web_search.enabled
-        if self.web_search_enabled and not self._llm_is_anthropic_native and not os.getenv("BRAVE_SEARCH_API_KEY"):
-            logger.warning(
-                "config.api.web_search.enabled is set but BRAVE_SEARCH_API_KEY is missing - "
-                "the web_search/web_fetch tools will be offered but every search call will "
-                "return an error until it's set in .env"
-            )
         if self.web_search_enabled:
             logger.info(
                 "Web search enabled (unlimited)"
                 if self._llm_is_anthropic_native else
-                "Web search enabled (client-side, Brave Search API)"
+                "Web search enabled (client-side, DuckDuckGo)"
             )
 
         # Initialize Discord tool executor (Phase 4)
@@ -1411,7 +1405,7 @@ class ReactiveEngine:
                 from tools.client_web_tools import execute_web_search
                 query = block.input.get("query", "")
                 note("web_search", "search", query)
-                result = await execute_web_search(query, os.getenv("BRAVE_SEARCH_API_KEY"))
+                result = await execute_web_search(query)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
