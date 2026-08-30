@@ -5,17 +5,23 @@ Anthropic's web_search / web_fetch (tools/web_search.py) are server-side
 tools executed by Anthropic itself - there's no equivalent wire-protocol
 feature for a generic OpenAI-compatible endpoint. These are ordinary
 function tools instead: the model calls them, this module makes the actual
-HTTP request, and the result goes back as a normal tool_result.
+search/HTTP request, and the result goes back as a normal tool_result.
 
-Search backend: Brave Search API (https://api.search.brave.com/). Requires
-BRAVE_SEARCH_API_KEY in .env - see .env.example.
+Search backend: DuckDuckGo via the `ddgs` package (https://pypi.org/project/ddgs/).
+No API key, no account, no card - it scrapes DuckDuckGo/Bing's public result
+pages rather than calling an official API, so it's inherently less reliable
+than a paid provider (result markup can change, or it can get rate-limited
+under heavy use) - that trade-off is the price of "genuinely free, no key".
 """
+import asyncio
 import html as html_lib
 import logging
 import re
 from typing import Optional
 
 import httpx
+from ddgs import DDGS
+from ddgs.exceptions import DDGSException
 
 logger = logging.getLogger(__name__)
 
@@ -56,37 +62,34 @@ _MAX_FETCH_CHARS = 8000
 _USER_AGENT = "Mozilla/5.0 (compatible; DiscordAgentBot/1.0; +https://github.com/)"
 
 
-async def execute_web_search(query: str, api_key: Optional[str]) -> str:
-    if not api_key:
-        return "Error: web search isn't configured (missing BRAVE_SEARCH_API_KEY in .env)"
+def _ddg_search_sync(query: str) -> list:
+    """Runs in a thread (see execute_web_search) - ddgs is a blocking library."""
+    return DDGS().text(query, max_results=_MAX_RESULTS)
+
+
+async def execute_web_search(query: str, api_key: Optional[str] = None) -> str:
+    """`api_key` is accepted (and ignored) for interface compatibility with
+    other search backends - DuckDuckGo needs none."""
     if not query or not query.strip():
         return "Error: query is required"
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                "https://api.search.brave.com/res/v1/web/search",
-                params={"q": query, "count": _MAX_RESULTS},
-                headers={"Accept": "application/json", "X-Subscription-Token": api_key},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Brave search HTTP error for '{query}': {e}")
-        return f"Error: search failed ({e.response.status_code})"
+        results = await asyncio.to_thread(_ddg_search_sync, query)
+    except DDGSException as e:
+        logger.error(f"DuckDuckGo search failed for '{query}': {e}")
+        return f"Error: search failed ({e})"
     except Exception as e:
-        logger.error(f"Brave search failed for '{query}': {e}", exc_info=True)
+        logger.error(f"DuckDuckGo search failed for '{query}': {e}", exc_info=True)
         return f"Error: search failed ({e})"
 
-    results = ((data or {}).get("web") or {}).get("results") or []
     if not results:
         return "No results found."
 
     lines = []
     for r in results[:_MAX_RESULTS]:
         title = r.get("title", "(no title)")
-        url = r.get("url", "")
-        snippet = re.sub(r"<[^>]+>", "", r.get("description", ""))  # Brave wraps snippet highlights in <strong>
+        url = r.get("href", "")
+        snippet = r.get("body", "")
         lines.append(f"- {title}\n  {url}\n  {snippet}")
     return "\n".join(lines)
 
