@@ -375,7 +375,8 @@ class ReactiveEngine:
         # Pending channels for periodic check (Phase 3)
         # Bug #7 fix: Track individual messages, not just channels
         # List of (channel_id, message_id) tuples to prevent message loss
-        self.pending_messages = []
+        # Using deque with maxlen to prevent unbounded growth
+        self.pending_messages = deque(maxlen=10000)
         self._expedited_scans = set()  # channels with a soft-reply scan queued
         self._periodic_task = None
         self._running = False
@@ -2235,11 +2236,25 @@ class ReactiveEngine:
             except asyncio.CancelledError:
                 pass
 
-        for task in self._background_tasks:
-            task.cancel()
-        # Wait briefly for cancellations to complete
+        # Cancel all background tasks and wait for completion
         if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            # Create a copy to avoid modification during iteration
+            tasks_to_cancel = list(self._background_tasks)
+            for task in tasks_to_cancel:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for all cancellations to complete with timeout
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks_to_cancel, return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Some background tasks did not cancel within timeout")
+            
+            # Clear the set
+            self._background_tasks.clear()
 
         # Cleanup v0.5.0 managers
         if self.mcp_manager:
@@ -2765,11 +2780,16 @@ DO NOT explain your reasoning for responding or not responding. DO NOT output me
             await asyncio.sleep(delay)
 
             # Claim this channel's pending entries (no await between the two
-            # list operations - atomic on the event loop)
+            # deque operations - atomic on the event loop). Rebuild in place
+            # to keep the deque type and its maxlen bound intact.
             mine = [p for p in self.pending_messages if p[0] == channel_id]
             if not mine:
                 return  # periodic loop already handled them
-            self.pending_messages = [p for p in self.pending_messages if p[0] != channel_id]
+            keep = deque(self.pending_messages.maxlen)
+            for p in self.pending_messages:
+                if p[0] != channel_id:
+                    keep.append(p)
+            self.pending_messages = keep
 
             triggers = []
             for cid, message_id in mine:
