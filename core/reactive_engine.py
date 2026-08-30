@@ -14,7 +14,7 @@ import io
 import json
 import logging
 import re
-from anthropic import Anthropic, AsyncAnthropic, NotFoundError
+from anthropic import NotFoundError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, List, Optional, TYPE_CHECKING
@@ -273,8 +273,11 @@ class ReactiveEngine:
         # on_ready); feeds the DM prime-context line (v0.9).
         self.list_servers = None
 
-        # Initialize Anthropic client
-        self.anthropic = AsyncAnthropic(api_key=anthropic_api_key)
+        # Initialize LLM client (Anthropic by default; OpenAI-compatible
+        # endpoint if LLM_PROVIDER=openai_compatible - see core/llm_providers/)
+        from core.llm_providers.factory import build_llm_client, is_anthropic_native
+        self.anthropic = build_llm_client(api_key=anthropic_api_key)
+        self._llm_is_anthropic_native = is_anthropic_native()
 
         # Cache internal config values (v0.6.0 - simplified config)
         self._rate_limiting_config = config.get_rate_limiting_config()
@@ -297,10 +300,23 @@ class ReactiveEngine:
             memory_manager=memory_manager,
         )
 
-        # Web search: all-or-nothing (no rate limiting)
+        # Web search: all-or-nothing (no rate limiting). Native web search is
+        # Anthropic's server tool; on LLM_PROVIDER=openai_compatible this
+        # instead uses client-side web_search/web_fetch tools backed by the
+        # Brave Search API - see tools/client_web_tools.py.
         self.web_search_enabled = config.api.web_search.enabled
+        if self.web_search_enabled and not self._llm_is_anthropic_native and not os.getenv("BRAVE_SEARCH_API_KEY"):
+            logger.warning(
+                "config.api.web_search.enabled is set but BRAVE_SEARCH_API_KEY is missing - "
+                "the web_search/web_fetch tools will be offered but every search call will "
+                "return an error until it's set in .env"
+            )
         if self.web_search_enabled:
-            logger.info("Web search enabled (unlimited)")
+            logger.info(
+                "Web search enabled (unlimited)"
+                if self._llm_is_anthropic_native else
+                "Web search enabled (client-side, Brave Search API)"
+            )
 
         # Initialize Discord tool executor (Phase 4)
         # Get user_cache from discord_client once it's set in on_ready
@@ -1052,7 +1068,11 @@ class ReactiveEngine:
             if skills_prompt:
                 system_blocks[0]["text"] += "\n\n" + skills_prompt
 
-        tools = [{"type": "memory_20250818", "name": "memory"}]
+        if self._llm_is_anthropic_native:
+            tools = [{"type": "memory_20250818", "name": "memory"}]
+        else:
+            from .memory_tool_executor import MEMORY_TOOL_SCHEMA
+            tools = [MEMORY_TOOL_SCHEMA]
 
         if self.discord_tool_executor:
             tools.extend(get_discord_tools())
@@ -1073,9 +1093,17 @@ class ReactiveEngine:
         tools.append(SEND_MESSAGE_TOOL)
 
         beta_headers = []
-        if self.web_search_enabled:
+        if self.web_search_enabled and self._llm_is_anthropic_native:
             web_search_config = self.config.get_web_search_config()
             tools.extend(get_web_search_tools(citations_enabled=web_search_config["citations_enabled"]))
+        elif self.web_search_enabled:
+            # LLM_PROVIDER=openai_compatible: no native server tool, so
+            # web_search/web_fetch are client-side function tools instead -
+            # see tools/client_web_tools.py and the dispatch in
+            # _dispatch_tool_calls (block.name == "web_search"/"web_fetch").
+            from tools.client_web_tools import WEB_SEARCH_TOOL, WEB_FETCH_TOOL
+            tools.append(WEB_SEARCH_TOOL)
+            tools.append(WEB_FETCH_TOOL)
 
         if self.mcp_manager:
             mcp_tools = self.mcp_manager.get_tools_for_api()
@@ -1373,6 +1401,28 @@ class ReactiveEngine:
                         block.input, message, loop_result)
                 else:
                     result = "send_message isn't available in this context."
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+
+            elif block.name == "web_search":
+                from tools.client_web_tools import execute_web_search
+                query = block.input.get("query", "")
+                note("web_search", "search", query)
+                result = await execute_web_search(query, os.getenv("BRAVE_SEARCH_API_KEY"))
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+
+            elif block.name == "web_fetch":
+                from tools.client_web_tools import execute_web_fetch
+                url = block.input.get("url", "")
+                note("web_fetch", "fetch", url)
+                result = await execute_web_fetch(url)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

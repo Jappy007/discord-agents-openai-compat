@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from .proactive_action import ProactiveAction
 from .engagement_tracker import EngagementTracker
 from .vaults import VaultEnforcer
+from .llm_providers.factory import utility_model
 from .internal_constants import (
     AGENTIC_EFFORT,
     FOLLOWUP_STANDALONE_IDLE_MINUTES,
@@ -121,6 +122,8 @@ class AgenticEngine:
         self.memory = memory_manager
         self.message_memory = message_memory
         self.anthropic = anthropic_client
+        from .llm_providers.factory import is_anthropic_native
+        self._llm_is_anthropic_native = is_anthropic_native()
         self.discord_client = None  # Set after Discord client initialization
 
         # Memory tool executor for the proactive tool loop (MemoryManager has
@@ -182,6 +185,17 @@ class AgenticEngine:
         if model_supports_effort(self.config.api.model):
             output_config["effort"] = AGENTIC_EFFORT
         return output_config
+
+    def _memory_only_tools(self) -> list:
+        """The proactive-message tool list is just the memory tool. Anthropic
+        native uses its server type; LLM_PROVIDER=openai_compatible declares
+        the same tool as an explicit function schema (dispatch below already
+        routes purely on `content_block.input`/name, so no other change is
+        needed)."""
+        if self._llm_is_anthropic_native:
+            return [{"type": "memory_20250818", "name": "memory"}]
+        from .memory_tool_executor import MEMORY_TOOL_SCHEMA
+        return [MEMORY_TOOL_SCHEMA]
 
     async def agentic_loop(self):
         """
@@ -856,7 +870,7 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
                 "max_tokens": 2000,  # thinking counts against this; truncation aborts the send
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": "\n".join(user_parts)}],
-                "tools": [{"type": "memory_20250818", "name": "memory"}],
+                "tools": self._memory_only_tools(),
                 "output_config": self._build_output_config(PROACTIVE_MESSAGE_SCHEMA),
             }
 
@@ -1009,7 +1023,7 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
                 )
                 try:
                     response = await self.anthropic.messages.create(
-                        model=WATCH_EVAL_MODEL,
+                        model=utility_model(WATCH_EVAL_MODEL),
                         max_tokens=WATCH_EVAL_MAX_TOKENS,
                         system=WATCH_EVAL_PROMPT.format(question=watch["question"]),
                         messages=[{"role": "user", "content": transcript}],

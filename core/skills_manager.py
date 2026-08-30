@@ -15,7 +15,6 @@ import zipfile
 import yaml
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Union
-from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +54,15 @@ class SkillsManager:
         self.cache_file = cache_file
         self.cache: Dict[str, Dict] = {}
         # Async client: skill uploads and list pagination are slow HTTP calls
-        # that ran during on_ready - a sync client stalls the gateway heartbeat
-        self.anthropic_client = AsyncAnthropic(api_key=anthropic_api_key) if anthropic_api_key else None
+        # that ran during on_ready - a sync client stalls the gateway heartbeat.
+        # Under LLM_PROVIDER=openai_compatible this is the adapter client,
+        # whose .beta.skills.* stubs raise FeatureNotSupportedError - caught
+        # by initialize() below, which cleanly disables skills entirely.
+        if anthropic_api_key:
+            from core.llm_providers.factory import build_llm_client
+            self.anthropic_client = build_llm_client(api_key=anthropic_api_key)
+        else:
+            self.anthropic_client = None
 
         # Ensure skills directory exists
         self.skills_dir.mkdir(parents=True, exist_ok=True)

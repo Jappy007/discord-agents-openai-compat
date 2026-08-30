@@ -25,6 +25,7 @@ from core.internal_constants import (
     EPISODE_DISTILL_MAX_TOKENS,
     EPISODE_RETRY_COOLDOWN_MINUTES,
 )
+from core.llm_providers.factory import utility_model
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +387,7 @@ class EpisodeManager:
 Distill this episode and return the updated channel state per the schema."""
 
         response = await self.anthropic.beta.messages.create(
-            model=EPISODE_DISTILL_MODEL,
+            model=utility_model(EPISODE_DISTILL_MODEL),
             max_tokens=EPISODE_DISTILL_MAX_TOKENS,
             system=DISTILL_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],

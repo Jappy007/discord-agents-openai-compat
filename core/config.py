@@ -413,6 +413,16 @@ class BotConfig:
             code_execution=code_execution,
         )
 
+        # LLM_PROVIDER=openai_compatible: OPENAI_MODEL (.env) overrides the
+        # yaml model/consolidation_model, since a Claude model name means
+        # nothing to a different provider. Keeps "everything needed for a
+        # new API" in .env rather than requiring a yaml edit per bot.
+        if (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower() == "openai_compatible":
+            env_model = os.getenv("OPENAI_MODEL")
+            if env_model:
+                api.model = env_model
+                api.consolidation_model = env_model
+
         # Parse logging config
         logging_data = data.get("logging", {})
         logging_config = LoggingConfig(
@@ -483,8 +493,17 @@ class BotConfig:
         elif not os.getenv(self.discord.token_env_var):
             errors.append(f"Missing environment variable: {self.discord.token_env_var}")
 
-        if not os.getenv("ANTHROPIC_API_KEY"):
-            errors.append("Missing ANTHROPIC_API_KEY in environment")
+        provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
+        if provider == "anthropic":
+            if not os.getenv("ANTHROPIC_API_KEY"):
+                errors.append("Missing ANTHROPIC_API_KEY in environment")
+        elif provider == "openai_compatible":
+            if not os.getenv("OPENAI_API_KEY"):
+                errors.append("Missing OPENAI_API_KEY in environment (required when LLM_PROVIDER=openai_compatible)")
+            if not os.getenv("OPENAI_BASE_URL"):
+                errors.append("Missing OPENAI_BASE_URL in environment (required when LLM_PROVIDER=openai_compatible)")
+        else:
+            errors.append(f"Unknown LLM_PROVIDER '{provider}' - expected 'anthropic' or 'openai_compatible'")
 
         # Type validation
         if not isinstance(self.discord.servers, list):

@@ -174,7 +174,13 @@ class BotManager:
             )
             logger.info("Agentic engine initialized")
 
-        if agentic_engine:
+        from core.llm_providers.factory import is_anthropic_native
+        if agentic_engine and not is_anthropic_native():
+            logger.warning(
+                "LLM_PROVIDER=openai_compatible: weekly memory consolidation uses "
+                "Anthropic's Batches API, which has no equivalent here - leaving it disabled"
+            )
+        elif agentic_engine:
             from core.consolidator import MemoryConsolidator
             agentic_engine.consolidator = MemoryConsolidator(
                 bot_id=self.bot_id,
@@ -317,12 +323,18 @@ class BotManager:
 
 async def _run_consolidation(bot_id: str, server_id: str, force: bool):
     """Standalone consolidation run (debug / live-test path)."""
-    from anthropic import AsyncAnthropic
+    from core.llm_providers.factory import build_llm_client, is_anthropic_native
     from core.consolidator import MemoryConsolidator
     from core.user_cache import UserCache
     from core.vaults import VaultEnforcer
 
     load_dotenv()
+    if not is_anthropic_native():
+        print(
+            "Error: memory consolidation uses Anthropic's Batches API, which has no "
+            "OpenAI-compatible equivalent. Set LLM_PROVIDER=anthropic to run this."
+        )
+        sys.exit(1)
     config_path = Path(f"bots/{bot_id}.yaml")
     if not config_path.exists():
         print(f"Error: no config at {config_path}")
@@ -337,7 +349,7 @@ async def _run_consolidation(bot_id: str, server_id: str, force: bool):
             bot_id=bot_id, config=config, message_memory=memory,
             memory_manager=MemoryManager(bot_id, Path("memories")),
             user_cache=user_cache,
-            anthropic_client=AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY")),
+            anthropic_client=build_llm_client(),
             vaults=VaultEnforcer(config.vaults),
         )
         report = await consolidator.consolidate_server(server_id, force=force)
@@ -350,12 +362,18 @@ async def _run_consolidation(bot_id: str, server_id: str, force: bool):
 async def _run_induction(bot_id: str, server_id: str, dry_run: bool,
                          channels, force_full: bool):
     """Standalone induction run: distill a backfilled server's backlog."""
-    from anthropic import AsyncAnthropic
+    from core.llm_providers.factory import build_llm_client, is_anthropic_native
     from core.inductor import ServerInductor
     from core.user_cache import UserCache
     from core.vaults import VaultEnforcer
 
     load_dotenv()
+    if not is_anthropic_native():
+        print(
+            "Error: induction uses Anthropic's Batches API, which has no "
+            "OpenAI-compatible equivalent. Set LLM_PROVIDER=anthropic to run this."
+        )
+        sys.exit(1)
     config_path = Path(f"bots/{bot_id}.yaml")
     if not config_path.exists():
         print(f"Error: no config at {config_path}")
@@ -374,7 +392,7 @@ async def _run_induction(bot_id: str, server_id: str, dry_run: bool,
         inductor = ServerInductor(
             bot_id=bot_id, config=config, message_memory=memory,
             memory_manager=memory_manager, user_cache=user_cache,
-            anthropic_client=AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY")),
+            anthropic_client=build_llm_client(),
             vaults=vaults,
         )
         report = await inductor.induct(server_id, dry_run=dry_run,

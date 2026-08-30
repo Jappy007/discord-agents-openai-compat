@@ -17,6 +17,47 @@ from .vaults import VaultEnforcer
 logger = logging.getLogger(__name__)
 
 
+# Explicit JSON schema for LLM_PROVIDER=openai_compatible, where the memory
+# tool is declared as a normal function tool rather than Anthropic's native
+# memory_20250818 server type (which carries no input_schema of its own,
+# since Anthropic defines it server-side). Dispatch is unchanged either way -
+# reactive_engine/agentic_engine route on `block.name == "memory"` regardless
+# of which tool declaration produced the tool_use block.
+MEMORY_TOOL_SCHEMA = {
+    "name": "memory",
+    "description": (
+        "Persistent memory tool. Commands: "
+        "'view' (list a directory or show a file, optional view_range=[start,end] line numbers), "
+        "'create' (write file_text to path, overwriting if it exists), "
+        "'str_replace' (replace exactly one occurrence of old_str with new_str in path), "
+        "'insert' (insert new_str after insert_line in path, 0 to insert at the top), "
+        "'delete' (remove the file or empty directory at path), "
+        "'rename' (move/rename path to new_path). "
+        "All paths must start with /memories/."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "enum": ["view", "create", "str_replace", "insert", "delete", "rename"],
+            },
+            "path": {"type": "string", "description": "Path under /memories/, e.g. /memories/bot_id/notes.md"},
+            "view_range": {
+                "type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2,
+                "description": "Optional [start_line, end_line] for 'view' on a file",
+            },
+            "file_text": {"type": "string", "description": "Full file content for 'create'"},
+            "old_str": {"type": "string", "description": "Exact text to replace, for 'str_replace'"},
+            "new_str": {"type": "string", "description": "Replacement text, for 'str_replace' or text to insert for 'insert'"},
+            "insert_line": {"type": "integer", "description": "Line number to insert after (0 = top of file), for 'insert'"},
+            "new_path": {"type": "string", "description": "Destination path, for 'rename'"},
+        },
+        "required": ["command", "path"],
+    },
+}
+
+
 class MemoryToolExecutor:
     """
     Executes memory tool commands on local filesystem.
