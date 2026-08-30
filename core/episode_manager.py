@@ -393,8 +393,11 @@ Distill this episode and return the updated channel state per the schema."""
             messages=[{"role": "user", "content": user_prompt}],
             output_config={"format": {"type": "json_schema", "schema": EPISODE_SCHEMA}},
         )
-        text = next(b.text for b in response.content if b.type == "text")
-        data = json.loads(text)
+        # Extract text block - handle missing text gracefully
+        text_block = next((b for b in response.content if b.type == "text"), None)
+        if text_block is None:
+            raise ValueError("Distillation response contains no text block")
+        data = json.loads(text_block.text)
 
         # Episode file - filename keyed by range-start ID (idempotent overwrite)
         slug = re.sub(r"[^a-z0-9-]", "", data["slug"].lower().replace(" ", "-"))[:40] or "episode"
