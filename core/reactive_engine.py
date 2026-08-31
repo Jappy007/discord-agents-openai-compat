@@ -48,6 +48,7 @@ from .internal_constants import (
 from tools.web_search import get_web_search_tools
 from tools.discord_tools import DiscordToolExecutor, get_discord_tools
 from tools.skills_tool import get_skill_request_tool, SkillRequestExecutor
+from core.local_attachment_store import LocalAttachmentStore
 
 logger = logging.getLogger(__name__)
 
@@ -355,6 +356,14 @@ class ReactiveEngine:
         # attachments feature: code execution is always available, and the
         # system prompt promises $OUTPUT_DIR files ride on the reply.
         self.files_api_client = FilesAPIClient(self.anthropic)
+
+        # Local attachment store + declarative pptx builder. The Files API /
+        # code-execution container are Anthropic-only; under
+        # LLM_PROVIDER=openai_compatible the model creates deliverables via
+        # the client-side create_pptx tool instead, writing into this store
+        # where send_message's attach_outputs can find them.
+        self.local_attachment_store = LocalAttachmentStore(bot_id=config.bot_id)
+        self.pptx_builder = None
 
         # Conversation State Manager (v0.5.0 - dual-cap context management)
         self.conversation_state_manager = None  # Initialized in async_initialize
@@ -772,7 +781,10 @@ class ReactiveEngine:
             except (ValueError, discord.NotFound, discord.HTTPException):
                 notes.append(f"reply target {reply_to} not found - sent standalone")
 
-        # Resolve requested attachments against THIS turn's container outputs
+        # Resolve requested attachments against THIS turn's outputs. Two
+        # sources: (1) Anthropic container output file_ids, and (2) files the
+        # model created via client-side tools (create_pptx on the local store),
+        # which is what openai_compatible mode uses since it has no container.
         outgoing_files = []
         requested = tool_input.get("attach_outputs") or []
         if requested:
@@ -786,15 +798,28 @@ class ReactiveEngine:
                     available[filename] = file_id
 
             matched_ids = []
+            matched_local = []
             for name in requested:
                 if name in available:
                     matched_ids.append(available[name])
+                elif self.local_attachment_store.exists(name):
+                    matched_local.append(name)
                 else:
                     notes.append(
                         f"'{name}' was NOT found among this turn's "
-                        f"code-execution outputs - it was not attached"
+                        f"code-execution outputs or created files - "
+                        f"it was not attached"
                     )
             outgoing_files = await self._container_files_for_discord(matched_ids)
+            # Local-store files (created outside the container) load straight
+            # from disk - no Files API involved.
+            for name in matched_local:
+                data = await self.local_attachment_store.load(name)
+                if data:
+                    outgoing_files.append(discord.File(io.BytesIO(data), filename=name))
+                    notes.append(f"attached previously created file '{name}'")
+            # Fresh create_pptx output belongs to this turn and will attach on
+            # a later send_message call too, so mark it consumed here.
             loop_result.consumed_file_ids.update(matched_ids)
 
         # Deliver, fragmented texting-style; files ride the first fragment
@@ -1106,11 +1131,23 @@ class ReactiveEngine:
                 tools.extend(mcp_tools)
                 logger.debug(f"Added {len(mcp_tools)} MCP tools to API request")
 
-        # Skills REQUIRE code_execution: skill files load into the container
-        if self.skills_manager:
+        # Skills REQUIRE code_execution: skill files load into the container.
+        # Anthropic native only - the container has no OpenAI-compatible
+        # equivalent (it's dropped from the outgoing request with a warning).
+        if self.skills_manager and self._llm_is_anthropic_native:
             tools.append({"type": "code_execution_20260120", "name": "code_execution"})
             tools.append(get_skill_request_tool())
             beta_headers.append("skills-2025-10-02")
+        elif self.skills_manager:
+            # OpenAI-compatible: no container, no code_execution, no Files API.
+            # Deliver the pptx built-in-skill capability as a client-side
+            # declarative tool instead - create_pptx builds the file in-process
+            # into the local attachment store, where send_message can ship it.
+            from tools.pptx_tools import get_create_pptx_tool
+            from tools.pptx_tools import PptxBuilder
+            if self.pptx_builder is None:
+                self.pptx_builder = PptxBuilder(self.local_attachment_store)
+            tools.append(get_create_pptx_tool())
 
         # Persisted state may carry file_id references even when fresh
         # uploads are disabled, so the beta rides whenever the manager exists
@@ -1379,6 +1416,22 @@ class ReactiveEngine:
                     )
                 else:
                     result = "ask_prime isn't available here."
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+
+            # Server-side pptx creation (OpenAI-compatible mode) - client-side
+            # tool, dispatched here like web_search/web_fetch. MUST precede the
+            # MCP "_" fallthrough.
+            elif block.name == "create_pptx":
+                note("create_pptx", "create",
+                     (block.input.get("title") or "")[:80])
+                if self.pptx_builder is not None:
+                    result = await self.pptx_builder.execute(block.input)
+                else:
+                    result = "create_pptx isn't available in this context."
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -1760,12 +1813,28 @@ class ReactiveEngine:
         Send a response to Discord, split to the message-length limit, with
         container-created deliverables riding on the first chunk.
 
+        Also attaches files the model created via client-side tools on
+        the local attachment store (create_pptx, on openai_compatible
+        mode) that have not yet been sent.
+
         Returns the last successfully sent message, or None if the first
         chunk could not be delivered at all.
         """
         from .discord_client import fragment_message
         message_chunks = fragment_message(response_text)
         outgoing_files = await self._container_files_for_discord(container_file_ids)
+
+        # Attach files created by client-side tools that are still
+        # pending delivery.
+        local_filenames = [
+            fn for fn in self.local_attachment_store.list_files()
+            if fn not in [f.filename for f in outgoing_files]
+        ]
+        for name in local_filenames:
+            data = await self.local_attachment_store.load(name)
+            if data:
+                outgoing_files.append(discord.File(io.BytesIO(data), filename=name))
+                logger.info(f"Local output ready for Discord: {name} ({len(data)} bytes)")
 
         sent_message = None
         for i, chunk in enumerate(message_chunks):
@@ -1786,6 +1855,11 @@ class ReactiveEngine:
                         logger.warning(f"Failed to send reply, trying standalone: {e}")
                         # discord.File objects are single-use; rebuild for the retry
                         outgoing_files = await self._container_files_for_discord(container_file_ids)
+                        for name in self.local_attachment_store.list_files():
+                            if name not in [f.filename for f in outgoing_files]:
+                                data = await self.local_attachment_store.load(name)
+                                if data:
+                                    outgoing_files.append(discord.File(io.BytesIO(data), filename=name))
                         sent_message = await channel.send(chunk, files=outgoing_files or None)
                     except discord.HTTPException as e2:
                         logger.error(f"Failed to send response to Discord: {e2}")

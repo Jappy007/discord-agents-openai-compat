@@ -302,14 +302,26 @@ print(df.describe())
 DELIVERING FILES: files you place in $OUTPUT_DIR (the code-exec environment's
 output directory) are attached to your Discord reply. To deliver a document,
 finish with e.g.: cp /tmp/briefing.pptx "$OUTPUT_DIR"/briefing.pptx
-Files left anywhere else are not attached. Never claim a file is attached
-unless you put it in $OUTPUT_DIR.
 
-CREATING PRESENTATIONS: to build a PowerPoint (.pptx) from scratch, first call
-request_skill with skill_name "pptx" to load the built-in skill, then use
-code_execution with python-pptx to generate the file and copy it to $OUTPUT_DIR.
-Use send_message with attach_outputs to send it mid-turn rather than waiting for
-end-of-turn delivery. Example skeleton:
+On this provider (without code execution), files are delivered from the
+local output store: create_pptx saves to it directly, and send_message's
+attach_outputs delivers any previously created file by name.
+
+Files left anywhere else are not attached. Never claim a file is attached
+unless you put it in $OUTPUT_DIR or it was created by a tool.
+
+CREATING PRESENTATIONS: on this provider without code execution,
+call create_pptx instead of python-pptx in code_execution. Provide a
+title and an ordered list of slides with titles and bullet points; the
+tool builds the .pptx locally and reports the saved filename. Pass
+that filename to send_message with attach_outputs to deliver it.
+
+On providers with code_execution, to build a PowerPoint (.pptx) from
+scratch, first call request_skill with skill_name "pptx" to load the
+built-in skill, then use code_execution with python-pptx to generate
+the file and copy it to $OUTPUT_DIR. Use send_message with attach_outputs
+to send it mid-turn rather than waiting for end-of-turn delivery.
+Example skeleton:
 
   from pptx import Presentation
   from pptx.util import Inches, Pt
