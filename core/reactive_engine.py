@@ -220,6 +220,7 @@ class ToolLoopResult:
     sent_message_ids: List[str] = field(default_factory=list)
     last_sent_message: Any = None  # discord.Message, for engagement tracking
     consumed_file_ids: set = field(default_factory=set)  # tool-attached, don't re-send
+    consumed_local_files: set = field(default_factory=set)  # local attachments, don't re-send
 
     @property
     def did_send(self) -> bool:
@@ -814,10 +815,14 @@ class ReactiveEngine:
             # Local-store files (created outside the container) load straight
             # from disk - no Files API involved.
             for name in matched_local:
+                if name in loop_result.consumed_local_files:
+                    notes.append(f"'{name}' was already attached in this turn and is not re-attached")
+                    continue
                 data = await self.local_attachment_store.load(name)
                 if data:
                     outgoing_files.append(discord.File(io.BytesIO(data), filename=name))
                     notes.append(f"attached previously created file '{name}'")
+                    loop_result.consumed_local_files.add(name)
             # Fresh create_pptx output belongs to this turn and will attach on
             # a later send_message call too, so mark it consumed here.
             loop_result.consumed_file_ids.update(matched_ids)

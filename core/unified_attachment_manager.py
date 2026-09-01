@@ -291,7 +291,7 @@ class UnifiedAttachmentManager:
                 }
 
         # Fallback if upload fails
-        logger.warning(f"Failed to upload {attachment.filename} to Files API, returning None")
+        logger.debug(f"Files API not available for {attachment.filename}, using local store only")
         return {
             "attachment_id": str(attachment.id),
             "attachment_type": att_type,

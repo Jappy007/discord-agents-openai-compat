@@ -69,7 +69,7 @@ class FilesAPIClient:
             return result
 
         except Exception as e:
-            logger.error(f"Failed to upload {filename}: {e}")
+            logger.debug(f"Files API not available on this provider: {filename}")
             return None
 
     async def delete(self, file_id: str) -> bool:
