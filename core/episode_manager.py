@@ -396,7 +396,17 @@ Distill this episode and return the updated channel state per the schema."""
         # Extract text block - handle missing text gracefully
         text_block = next((b for b in response.content if b.type == "text"), None)
         if text_block is None:
-            raise ValueError("Distillation response contains no text block")
+            logger.warning(
+                f"Distillation for channel {channel_id} returned no text block. "
+                f"Response content types: {[b.type for b in response.content]}"
+            )
+            # Return a minimal episode so the watermark advances and the loop continues
+            return {
+                "title": "Untitled Episode",
+                "slug": "untitled-episode",
+                "index_hook": "No content available",
+            }
+
         data = json.loads(text_block.text)
 
         # Episode file - filename keyed by range-start ID (idempotent overwrite)

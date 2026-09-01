@@ -11,7 +11,7 @@ Handles proactive bot behaviors:
 import asyncio
 import logging
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, TYPE_CHECKING
 
