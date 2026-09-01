@@ -31,15 +31,14 @@ class RateLimiter:
 
     def __init__(self, config: Optional[Dict] = None):
         # Track response timestamps per channel
-        from collections import deque
+        from collections import deque, defaultdict
 
+        # Use deque for O(1) popleft operations during cleanup
+        # This significantly speeds up the rate limiting cleanup process
+        self.response_times: Dict[str, deque] = defaultdict(deque)
 
-# Use deque for O(1) popleft operations during cleanup
-# This significantly speeds up the rate limiting cleanup process
-self.response_times: Dict[str, deque] = defaultdict(deque)
-
-# Track consecutive ignores per channel
-self.ignored_count: Dict[str, int] = defaultdict(int)
+        # Track consecutive ignores per channel
+        self.ignored_count: Dict[str, int] = defaultdict(int)
 
         # When each channel crossed the silence threshold (None = not silenced)
         self.silence_started: Dict[str, Optional[datetime]] = defaultdict(lambda: None)
@@ -67,12 +66,12 @@ self.ignored_count: Dict[str, int] = defaultdict(int)
         now = datetime.now()
         times = self.response_times[channel_id]
 
-# Clean up old responses outside long window
-cutoff = now - timedelta(minutes=self.long_window_minutes)
-# Efficient cleanup using deque popleft for O(1) removal
-while times and times[0] <= cutoff:
-    times.popleft()
-# No need to reassign since we're modifying the deque in place
+        # Clean up old responses outside long window
+        cutoff = now - timedelta(minutes=self.long_window_minutes)
+        # Efficient cleanup using deque popleft for O(1) removal
+        while times and times[0] <= cutoff:
+            times.popleft()
+        # No need to reassign since we're modifying the deque in place
 
         # Check short window
         short_cutoff = now - timedelta(minutes=self.short_window_minutes)

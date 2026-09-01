@@ -155,27 +155,27 @@ class ConversationState:
         """
         removed_count = 0
 
-while True:
-    # Find first Discord message index (more efficient than building full list each iteration)
-    for i, msg in enumerate(self.messages):
-        if msg.get("message_type", "discord_user").startswith("discord_"):
-            # Found oldest Discord message
-            removed_message = self.messages.pop(i)
-            removed_count += 1
-            self.messages_removed += 1
-            logger.debug(
-                f"Removed oldest Discord message due to message cap "
-                f"(role={removed_message['role']}, message_type={removed_message.get('message_type', 'unknown')})"
-            )
-            break
-    else:
-        # No more Discord messages found
-        break
-    if len([
-        msg for msg in self.messages
-        if msg.get("message_type", "discord_user").startswith("discord_")
-    ]) <= self.max_messages:
-        break
+        while True:
+            # Find first Discord message index (more efficient than building full list each iteration)
+            for i, msg in enumerate(self.messages):
+                if msg.get("message_type", "discord_user").startswith("discord_"):
+                    # Found oldest Discord message
+                    removed_message = self.messages.pop(i)
+                    removed_count += 1
+                    self.messages_removed += 1
+                    logger.debug(
+                        f"Removed oldest Discord message due to message cap "
+                        f"(role={removed_message['role']}, message_type={removed_message.get('message_type', 'unknown')})"
+                    )
+                    break
+            else:
+                # No more Discord messages found
+                break
+            if len([
+                msg for msg in self.messages
+                if msg.get("message_type", "discord_user").startswith("discord_")
+            ]) <= self.max_messages:
+                break
 
         # Popping the head can leave tool messages or an assistant turn first
         removed_count += self.trim_leading_non_user()
