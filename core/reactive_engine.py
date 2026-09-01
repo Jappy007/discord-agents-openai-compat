@@ -1124,6 +1124,15 @@ class ReactiveEngine:
         from tools.send_message import SEND_MESSAGE_TOOL
         tools.append(SEND_MESSAGE_TOOL)
 
+        # Reaction tools
+        from tools.reaction_tools import get_reaction_tools
+        tools.extend(get_reaction_tools())
+
+        # Reactions: lightweight acknowledgments without full replies
+        from tools.reaction_tools import get_add_reaction_tool, get_remove_reaction_tool
+        tools.append(get_add_reaction_tool())
+        tools.append(get_remove_reaction_tool())
+
         beta_headers = []
         if self.web_search_enabled and self._llm_is_anthropic_native:
             web_search_config = self.config.get_web_search_config()
@@ -1483,6 +1492,16 @@ class ReactiveEngine:
                 url = block.input.get("url", "")
                 note("web_fetch", "fetch", url)
                 result = await execute_web_fetch(url)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+
+            elif block.name in ("add_reaction", "remove_reaction"):
+                from tools.reaction_tools import execute_reaction_tool
+                note("reaction", block.name, kv(block.input))
+                result = await execute_reaction_tool(block.name, block.input, message)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

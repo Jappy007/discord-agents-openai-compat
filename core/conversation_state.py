@@ -177,8 +177,11 @@ class ConversationState:
             ]) <= self.max_messages:
                 break
 
-        # Popping the head can leave tool messages or an assistant turn first
-        removed_count += self.trim_leading_non_user()
+        # Only trim leading non-user messages if the cap loop actually removed
+        # Discord messages - otherwise this fires unconditionally and strips
+        # assistant turns way before the cap is hit.
+        if removed_count:
+            removed_count += self.trim_leading_non_user()
 
         if removed_count > 0:
             discord_count = len([
