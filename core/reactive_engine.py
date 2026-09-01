@@ -847,6 +847,11 @@ class ReactiveEngine:
         if sent is None:
             return "Error: nothing was sent (empty after fragmentation)."
 
+        # Delivered local-store files are spent: delete them so they never
+        # ride a future end-of-turn send (v0.12.1 duplicate-attachment fix).
+        for name in matched_local:
+            await self.local_attachment_store.delete(name)
+
         # Same registration the legacy text path does on first outbound (v0.9)
         await self._register_dm_surface(channel)
 
@@ -1812,6 +1817,7 @@ class ReactiveEngine:
         channel,
         response_text: str,
         container_file_ids: list,
+        result: Optional["ToolLoopResult"] = None,
         reference: Optional[discord.Message] = None,
     ) -> Optional[discord.Message]:
         """
@@ -1830,10 +1836,12 @@ class ReactiveEngine:
         outgoing_files = await self._container_files_for_discord(container_file_ids)
 
         # Attach files created by client-side tools that are still
-        # pending delivery.
+        # pending delivery (not yet sent this turn or via send_message).
+        consumed = result.consumed_local_files if result else set()
         local_filenames = [
             fn for fn in self.local_attachment_store.list_files()
             if fn not in [f.filename for f in outgoing_files]
+            and fn not in consumed
         ]
         for name in local_filenames:
             data = await self.local_attachment_store.load(name)
@@ -1848,6 +1856,10 @@ class ReactiveEngine:
                     sent_message = await channel.send(
                         chunk, reference=reference, files=outgoing_files or None
                     )
+                    if result:
+                        result.consumed_local_files.update(local_filenames)
+                    for name in local_filenames:
+                        await self.local_attachment_store.delete(name)
                 else:
                     sent_message = await channel.send(chunk)
                 # Register the DM surface on the first successful outbound send (v0.9)
@@ -1861,11 +1873,15 @@ class ReactiveEngine:
                         # discord.File objects are single-use; rebuild for the retry
                         outgoing_files = await self._container_files_for_discord(container_file_ids)
                         for name in self.local_attachment_store.list_files():
-                            if name not in [f.filename for f in outgoing_files]:
+                            if name not in [f.filename for f in outgoing_files] and name not in result.consumed_local_files:
                                 data = await self.local_attachment_store.load(name)
                                 if data:
                                     outgoing_files.append(discord.File(io.BytesIO(data), filename=name))
                         sent_message = await channel.send(chunk, files=outgoing_files or None)
+                        if result:
+                            result.consumed_local_files.update(local_filenames)
+                        for name in local_filenames:
+                            await self.local_attachment_store.delete(name)
                     except discord.HTTPException as e2:
                         logger.error(f"Failed to send response to Discord: {e2}")
                         self.conversation_logger.log_error(f"Discord send failed: {str(e2)}")
@@ -2065,6 +2081,7 @@ class ReactiveEngine:
             if result.response_text.strip():
                 sent_message = await self._send_response_chunks(
                     message.channel, result.response_text, result.pending_file_ids,
+                    result,
                     reference=message,
                 )
                 if sent_message is None and not result.did_send:
@@ -2126,10 +2143,10 @@ class ReactiveEngine:
             if content:
                 await self._send_response_chunks(
                     channel, f"here's everything I have on you, verbatim:\n```\n{content}\n```",
-                    [])
+                    [], result=None)
             else:
                 await self._send_response_chunks(
-                    channel, "nothing written down about you yet - we're starting fresh.", [])
+                    channel, "nothing written down about you yet - we're starting fresh.", [], result=None)
             return
 
         intent = memory_intent(kind, text, user.display_name)
@@ -2178,7 +2195,7 @@ class ReactiveEngine:
 
             if result.response_text.strip():
                 await self._send_response_chunks(channel, result.response_text,
-                                                 result.pending_file_ids)
+                                                 result.pending_file_ids, result)
 
             if result.thinking_text:
                 self.conversation_logger.log_thinking(result.thinking_text, len(result.thinking_text))
@@ -2725,6 +2742,7 @@ class ReactiveEngine:
                 if result.response_text.strip():
                     sent_message = await self._send_response_chunks(
                         message.channel, result.response_text, result.pending_file_ids,
+                        result,
                     )
                     if sent_message is None and not result.did_send:
                         return
