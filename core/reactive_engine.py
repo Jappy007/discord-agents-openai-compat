@@ -2848,14 +2848,16 @@ Your personality and base prompt guide whether to participate. Consider relevanc
 - Would interrupt natural flow
 - Just agreeing without adding value
 - Making conversation about yourself
+- You want to acknowledge you saw it without adding value: use `add_reaction` instead (e.g. 👍, 👀, ❤️)
 
 **RESPONSE FORMAT:**
-- If you decide to respond: Output ONLY your message to the channel (no meta-commentary, no explanation of your decision)
-- If you decide NOT to respond: Output ABSOLUTELY NOTHING (not even an explanation - complete silence)
+- If you decide to respond with text: Output ONLY your message to the channel (no meta-commentary, no explanation of your decision)
+- If you decide NOT to respond with text but still want to acknowledge: call `add_reaction` with an appropriate emoji, then output nothing
+- If you decide NOT to respond at all: Output ABSOLUTELY NOTHING (not even an explanation - complete silence)
 - When your response answers ONE specific message in a batch of several, prefer the send_message tool with reply_to_message_id so it lands anchored to that message
 - send_message can be called more than once in a turn (messages arrive in order) - e.g. an anchored reply to one person, then a separate message for the others. If you've sent everything that way, output nothing afterward
 
-DO NOT explain your reasoning for responding or not responding. DO NOT output meta-commentary about the conversation. Either respond naturally or output nothing.
+DO NOT explain your reasoning for responding or not responding. DO NOT output meta-commentary about the conversation. Either respond naturally, react, or output nothing.
 """
 
         # Single cached block; volatile values (timestamp, momentum) ride the
