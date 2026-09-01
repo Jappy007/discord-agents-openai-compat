@@ -787,6 +787,7 @@ class ReactiveEngine:
         # model created via client-side tools (create_pptx on the local store),
         # which is what openai_compatible mode uses since it has no container.
         outgoing_files = []
+        matched_local = []
         requested = tool_input.get("attach_outputs") or []
         if requested:
             available = {}  # filename -> file_id, first occurrence wins
@@ -826,6 +827,7 @@ class ReactiveEngine:
             # Fresh create_pptx output belongs to this turn and will attach on
             # a later send_message call too, so mark it consumed here.
             loop_result.consumed_file_ids.update(matched_ids)
+
 
         # Deliver, fragmented texting-style; files ride the first fragment
         from .discord_client import fragment_message
