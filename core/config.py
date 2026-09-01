@@ -10,6 +10,7 @@ See internal_constants.py for hardcoded implementation details.
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
+from functools import lru_cache
 import yaml
 import os
 import logging
@@ -194,6 +195,7 @@ class DiscordConfig:
 
 
 @dataclass
+
 class BotConfig:
     """
     Complete bot configuration.

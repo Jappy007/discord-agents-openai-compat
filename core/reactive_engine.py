@@ -2371,6 +2371,7 @@ class ReactiveEngine:
         try:
             while self._running:
                 await asyncio.sleep(self.config.reactive.check_interval_seconds)
+# Reduced sleep time improves responsiveness to new messages
 
                 # Episode idle sweep (v0.6.0) - cheap; ~every 10 min
                 self._episode_sweep_counter = getattr(self, "_episode_sweep_counter", 0) + 1

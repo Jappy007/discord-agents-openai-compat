@@ -232,9 +232,9 @@ class BotManager:
             # Schedule crash test if enabled
             if self.crash_test:
                 async def crash_after_delay():
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(0.1)  # Reduced from 5s to minimal delay
                     logger.warning("CRASH TEST: Forcefully terminating in 1 second...")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.1)  # Reduced from 1s to minimal delay
                     logger.error("CRASH TEST: Simulating crash via os._exit(1)")
                     os._exit(1)
 

@@ -69,7 +69,7 @@ reactive:
   enabled: true
   always_respond_to_mentions: true  # Guaranteed response to @mentions
   rate_limit: "moderate"            # strict | moderate | permissive | unlimited
-  check_interval_seconds: 60        # How often pending messages are scanned
+  check_interval_seconds: 10        # Reduced from 60s to 10s for more responsive scanning
 
 # ============================================================
 # AUTONOMOUS BEHAVIOR

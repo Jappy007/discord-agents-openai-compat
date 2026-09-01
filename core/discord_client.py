@@ -981,7 +981,7 @@ class DiscordClient(discord.Client):
                 profile_content = ""
 
             # Update or add timezone
-            import re
+
             if "**Timezone:**" in profile_content:
                 # Replace existing timezone
                 profile_content = re.sub(

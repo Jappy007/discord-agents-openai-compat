@@ -564,7 +564,7 @@ class MessageMemory:
 
             cursor = await self._db.execute(
                 f"""
-                SELECT * FROM messages
+                SELECT m.* FROM messages m
                 WHERE channel_id = ?
                 AND message_id NOT IN ({placeholders})
                 ORDER BY timestamp DESC
@@ -575,7 +575,7 @@ class MessageMemory:
         else:
             cursor = await self._db.execute(
                 """
-                SELECT * FROM messages
+                SELECT m.* FROM messages m
                 WHERE channel_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -598,7 +598,7 @@ class MessageMemory:
 
         cursor = await self._db.execute(
             """
-            SELECT * FROM messages
+            SELECT m.* FROM messages m
             WHERE channel_id = ?
             ORDER BY timestamp ASC
             LIMIT ?
@@ -618,7 +618,7 @@ class MessageMemory:
 
         cursor = await self._db.execute(
             """
-            SELECT * FROM messages
+            SELECT m.* FROM messages m
             WHERE channel_id = ?
             AND timestamp > ?
             ORDER BY timestamp ASC
@@ -665,7 +665,7 @@ class MessageMemory:
         if after_message_id is None:
             cursor = await self._db.execute(
                 """
-                SELECT * FROM messages WHERE channel_id = ? AND is_system = 0
+                SELECT m.* FROM messages m WHERE m.channel_id = ? AND is_system = 0
                 ORDER BY CAST(message_id AS INTEGER) ASC
                 """,
                 (channel_id,),
@@ -673,7 +673,7 @@ class MessageMemory:
         else:
             cursor = await self._db.execute(
                 """
-                SELECT * FROM messages
+                SELECT m.* FROM messages m
                 WHERE channel_id = ? AND is_system = 0
                   AND CAST(message_id AS INTEGER) > CAST(? AS INTEGER)
                 ORDER BY CAST(message_id AS INTEGER) ASC
@@ -795,7 +795,7 @@ class MessageMemory:
         """Get the most recent non-system message in a channel, or None."""
         cursor = await self._db.execute(
             """
-            SELECT * FROM messages WHERE channel_id = ? AND is_system = 0
+            SELECT m.* FROM messages m WHERE m.channel_id = ? AND is_system = 0
             ORDER BY CAST(message_id AS INTEGER) DESC LIMIT 1
             """,
             (channel_id,),
@@ -808,7 +808,7 @@ class MessageMemory:
         """One stored message by id (durable - survives the live context window).
         Used to quote a replied-to message however old it is."""
         cursor = await self._db.execute(
-            "SELECT * FROM messages WHERE message_id = ? AND channel_id = ?",
+            "SELECT m.* FROM messages m WHERE message_id = ? AND channel_id = ?",
             (str(message_id), str(channel_id)),
         )
         row = await cursor.fetchone()
@@ -821,7 +821,7 @@ class MessageMemory:
         """Non-system messages after a cursor, oldest-first (v0.9 watches).
         after_message_id wins when set; after_timestamp (ISO string) is the
         fallback for a watch that has never been checked."""
-        query = "SELECT * FROM messages WHERE channel_id = ? AND is_system = 0"
+        query = "SELECT m.* FROM messages m WHERE m.channel_id = ? AND is_system = 0"
         params: list = [str(channel_id)]
         if after_message_id is not None:
             query += " AND CAST(message_id AS INTEGER) > ?"
@@ -980,7 +980,7 @@ class MessageMemory:
 
         # Get target message to know its timestamp
         cursor = await self._db.execute(
-            "SELECT * FROM messages WHERE message_id = ? AND channel_id = ?",
+            "SELECT m.* FROM messages m WHERE message_id = ? AND channel_id = ?",
             (message_id, channel_id)
         )
         target_row = await cursor.fetchone()
@@ -994,7 +994,7 @@ class MessageMemory:
         # Get messages before
         cursor = await self._db.execute(
             """
-            SELECT * FROM messages
+            SELECT m.* FROM messages m
             WHERE channel_id = ? AND timestamp < ?
             ORDER BY timestamp DESC
             LIMIT ?
@@ -1007,7 +1007,7 @@ class MessageMemory:
         # Get messages after
         cursor = await self._db.execute(
             """
-            SELECT * FROM messages
+            SELECT m.* FROM messages m
             WHERE channel_id = ? AND timestamp > ?
             ORDER BY timestamp ASC
             LIMIT ?
@@ -1124,7 +1124,7 @@ class MessageMemory:
         """Latest messages by one user in one server (newest first), for
         profile-rewrite evidence."""
         sql = """
-            SELECT * FROM messages
+            SELECT m.* FROM messages m
             WHERE author_id = ? AND guild_id = ? AND is_system = 0
         """
         params: list = [author_id, server_id]

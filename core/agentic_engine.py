@@ -11,7 +11,7 @@ Handles proactive bot behaviors:
 import asyncio
 import logging
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timezone
 from pathlib import Path
 from typing import List, Optional, Dict, TYPE_CHECKING
 
@@ -786,7 +786,7 @@ Your personality:
                 bot_display_name = guild.me.display_name
 
             # Get current time
-            from datetime import datetime
+
             current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
 
             # Build system prompt with personality

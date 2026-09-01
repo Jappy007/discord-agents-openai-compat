@@ -72,3 +72,5 @@ CLAUDE.md
 
 app/node_modules/
 app/dist/
+core/import_analysis.py
+import_analysis_report.txt
