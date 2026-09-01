@@ -14,6 +14,8 @@ class AttachmentClassifier:
     # Extension to category mappings
     EXTENSION_CATEGORIES: Dict[str, Set[str]] = {
         'image': {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'},
+        'video': {'.mp4', '.mov', '.avi', '.webm', '.mkv'},
+        'audio': {'.mp3', '.wav', '.ogg', '.flac'},
         'document': {'.pdf', '.docx', '.doc', '.txt', '.md', '.rtf', '.odt'},
         'spreadsheet': {'.xlsx', '.xls', '.csv', '.ods'},
         'code': {'.py', '.js', '.ts', '.java', '.cpp', '.c', '.rs', '.go', '.rb',

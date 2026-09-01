@@ -1128,6 +1128,13 @@ class ReactiveEngine:
         from tools.reaction_tools import get_reaction_tools
         tools.extend(get_reaction_tools())
 
+        # YouTube watching tool (if available)
+        try:
+            from tools.youtube_tools import get_watch_youtube_tool
+            tools.append(get_watch_youtube_tool())
+        except Exception:
+            pass  # youtube-transcript-api not installed
+
         # Reactions: lightweight acknowledgments without full replies
         from tools.reaction_tools import get_add_reaction_tool, get_remove_reaction_tool
         tools.append(get_add_reaction_tool())
@@ -1502,6 +1509,16 @@ class ReactiveEngine:
                 from tools.reaction_tools import execute_reaction_tool
                 note("reaction", block.name, kv(block.input))
                 result = await execute_reaction_tool(block.name, block.input, message)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+
+            elif block.name == "watch_youtube":
+                from tools.youtube_tools import execute_watch_youtube
+                note("youtube", "watch", block.input.get("url", ""))
+                result = await execute_watch_youtube(block.input)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

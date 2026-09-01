@@ -838,10 +838,26 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
                 emoji_str = str(reaction.emoji)
                 count = reaction.count
                 reaction_strs.append(f"{emoji_str}×{count}")
-
             if reaction_strs:
                 has_reactions = True
                 parts.append(f"  *(Reactions: {', '.join(reaction_strs)})*")
+
+        # Flag YouTube URLs so the model knows to use watch_youtube
+        text = message.content or ""
+        if re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/)', text):
+            parts.append("  *[YouTube link detected - use watch_youtube tool to read it]*")
+
+        # Flag video attachments so the model knows what was shared
+        for attachment in message.attachments:
+            if attachment.filename.lower().endswith(('.mp4', '.mov', '.avi', '.webm', '.mkv')):
+                parts.append(f"  *[Video attached: {attachment.filename}]*")
+                break
+
+        # Flag video attachments
+        for attachment in message.attachments:
+            if attachment.filename and attachment.filename.lower().endswith(('.mp4', '.mov', '.avi', '.webm', '.mkv')):
+                parts.append(f"  *[Video attached: {attachment.filename}]*")
+                break
 
         # Add reply information
         if message.reference and message.reference.resolved:
