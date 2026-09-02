@@ -217,6 +217,9 @@ class AgenticEngine:
                 # success side of the stats that should_engage_proactively reads
                 await self.settle_pending_engagements()
 
+                # Update bot status based on recent memories/conversations
+                await self.check_status_update()
+
                 # Get all servers bot is in
                 # (We'll get this from message_memory - channels we've seen)
                 servers = await self._get_active_servers()
@@ -1309,14 +1312,81 @@ this room talks - brief, natural, and honest about where it comes from."""
         except Exception as e:
             logger.error(f"Error recording proactive attempt: {e}", exc_info=True)
 
-    async def _get_active_servers(self) -> List[str]:
-        """
-        Get list of active server IDs.
+    async def check_status_update(self):
+        """Update bot's Discord status based on recent memories/conversations."""
+        if not self.discord_client:
+            logger.debug("No Discord client available for status update")
+            return
 
-        Returns:
-            List of server IDs
-        """
-        return await self.message_memory.get_active_servers()
+        # Get recent messages from all channels to inform status
+        try:
+            servers = await self._get_active_servers()
+            all_recent = []
+
+            for server_id in servers:
+                server = self.discord_client.get_guild(int(server_id))
+                if server:
+                    for channel in server.text_channels:
+                        recent = await self.message_memory.get_recent(channel.id, limit=3)
+                        all_recent.extend(recent)
+
+            # Build context from recent conversations
+            recent_content = []
+            for msg in all_recent[-50:]:  # Limit to last 50 messages
+                content = msg.content or "[no content]"
+                recent_content.append(f"{msg.author_name}: {content[:100]}")
+
+            # Get bot's current status
+            current_status = None
+            for activity in self.discord_client.activities:
+                if hasattr(activity, 'name'):
+                    current_status = activity.name
+                    break
+
+            # Use Claude to generate a funny/shareable status
+            base_prompt = (
+                self.config.personality.base_prompt
+                if self.config.personality
+                else "You are a helpful Discord bot assistant."
+            )
+
+            prompt = f"""{base_prompt}
+
+You are seeing recent conversations from your servers. Pick something funny, relatable, or interesting to set as your Discord status. Your status should be short (max 128 characters) and make people smile or curious. Do NOT use hashtags.
+
+Recent conversations:
+{chr(10).join(recent_content[-20:])}  # Last 20 lines
+
+Current status: {current_status or "(none)"}
+
+Return ONLY the new status text, nothing else."""
+
+            response = await self.anthropic.messages.create(
+                model=self.config.api.model,
+                max_tokens=150,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            # Extract status from response
+            new_status = None
+            for block in response.content:
+                if block.type == "text":
+                    new_status = block.text.strip().strip('"').strip("'")
+                    # Clean up - remove any "New status: " prefix
+                    if new_status.lower().startswith("new status: "):
+                        new_status = new_status[len("new status: "):]
+                    break
+
+            if new_status and len(new_status) <= 128:
+                import discord
+                activity = discord.Game(name=new_status)
+                await self.discord_client.change_presence(activity=activity)
+                logger.info(f"Updated Discord status to: {new_status}")
+            else:
+                logger.debug("Generated status was too long or empty, skipping update")
+
+        except Exception as e:
+            logger.error(f"Error updating Discord status: {e}", exc_info=True)
 
     async def _get_server_for_channel(self, channel_id: str) -> Optional[str]:
         """

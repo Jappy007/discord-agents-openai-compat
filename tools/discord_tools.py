@@ -73,6 +73,8 @@ class DiscordToolExecutor:
             return await self._get_attachment(tool_input, current_server_id, current_channel_id)
         elif command == "list_attachments":
             return await self._list_attachments(tool_input, current_server_id, current_channel_id)
+        elif command == "change_status":
+            return await self._change_status(tool_input)
         else:
             return f"Unknown Discord tool command: {command}"
 
@@ -559,6 +561,28 @@ class DiscordToolExecutor:
             logger.error(f"Error listing attachments: {e}", exc_info=True)
             return f"Error listing attachments: {str(e)}"
 
+    async def _change_status(self, params: dict) -> str:
+        """Change the bot's Discord presence status."""
+        status_text = params.get("status", "").strip()
+        if not status_text:
+            return "Error: status parameter required"
+
+        if len(status_text) > 128:
+            return f"Error: status too long (max 128 characters, got {len(status_text)})"
+
+        if not self.discord_client:
+            return "Error: Discord client not available"
+
+        import discord
+        try:
+            activity = discord.Game(name=status_text)
+            await self.discord_client.change_presence(activity=activity)
+            logger.info(f"Status changed to: {status_text}")
+            return f"✓ Status changed to: **{status_text}**"
+        except Exception as e:
+            logger.error(f"Error changing status: {e}", exc_info=True)
+            return f"Error changing status: {str(e)}"
+
 
 def get_discord_tools() -> list:
     """
@@ -575,7 +599,7 @@ def get_discord_tools() -> list:
                 "properties": {
                     "command": {
                         "type": "string",
-                        "enum": ["search_messages", "view_messages", "get_user_info", "get_channel_info", "get_attachment", "list_attachments"],
+                        "enum": ["search_messages", "view_messages", "get_user_info", "get_channel_info", "get_attachment", "list_attachments", "change_status"],
                         "description": "Discord tool command to execute"
                     },
                     "query": {
@@ -643,6 +667,10 @@ def get_discord_tools() -> list:
                         "type": "string",
                         "enum": ["channel", "server", "global"],
                         "description": "[search_messages] reach: channel | server (default) | global. [list_attachments] server (default) | global."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "[change_status] New status text to display (max 128 characters)"
                     }
                 },
                 "required": ["command"]
