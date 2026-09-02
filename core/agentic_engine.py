@@ -1324,11 +1324,16 @@ this room talks - brief, natural, and honest about where it comes from."""
             all_recent = []
 
             for server_id in servers:
-                server = self.discord_client.get_guild(int(server_id))
-                if server:
-                    for channel in server.text_channels:
-                        recent = await self.message_memory.get_recent(channel.id, limit=3)
-                        all_recent.extend(recent)
+                try:
+                    guild = self.discord_client.get_guild(int(server_id))
+                except Exception:
+                    continue
+                if not guild:
+                    continue
+                for channel in guild.text_channels:
+                    recent = await self.message_memory.get_recent(channel.id, limit=3)
+                    all_recent.extend(recent)
+
 
             # Build context from recent conversations
             recent_content = []
