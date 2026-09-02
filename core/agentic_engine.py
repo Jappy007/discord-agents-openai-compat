@@ -1388,6 +1388,15 @@ Return ONLY the new status text, nothing else."""
         except Exception as e:
             logger.error(f"Error updating Discord status: {e}", exc_info=True)
 
+    async def _get_active_servers(self) -> List[str]:
+        """
+        Get list of active server IDs.
+
+        Returns:
+            List of server IDs
+        """
+        return await self.message_memory.get_active_servers()
+
     async def _get_server_for_channel(self, channel_id: str) -> Optional[str]:
         """
         Get server ID for channel.
