@@ -1342,11 +1342,10 @@ this room talks - brief, natural, and honest about where it comes from."""
                 recent_content.append(f"{msg.author_name}: {content[:100]}")
 
             # Get bot's current status
-            current_status = None
-            for activity in self.discord_client.activities:
-                if hasattr(activity, 'name'):
-                    current_status = activity.name
-                    break
+            try:
+                current_status = self.discord_client.activity.name if self.discord_client.activity and hasattr(self.discord_client.activity, 'name') else None
+            except Exception:
+                current_status = None
 
             # Use Claude to generate a funny/shareable status
             base_prompt = (
