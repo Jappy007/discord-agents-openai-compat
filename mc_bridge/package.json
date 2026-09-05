@@ -9,6 +9,6 @@
   },
   "dependencies": {
     "mineflayer": "^4.20.1",
-    "mineflayer-pathfinder": "^2.9.4"
+    "mineflayer-pathfinder": "^2.4.5"
   }
 }

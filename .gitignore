@@ -51,6 +51,7 @@ mcp_servers.json
 .skills_cache.json
 Test-MCP-Servers/
 test_files/
+mc_bridge/node_modules/
 
 # Build artifacts
 dist/
