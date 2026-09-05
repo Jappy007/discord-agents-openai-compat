@@ -28,6 +28,7 @@ from core.message_memory import MessageMemory
 from core.memory_manager import MemoryManager
 from core.reactive_engine import ReactiveEngine
 from core.discord_client import DiscordClient
+from core.minecraft_client import MinecraftClient
 from core.user_cache import UserCache
 
 
@@ -104,7 +105,9 @@ class BotManager:
 
         # Extract API credentials (already validated)
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-        discord_token = os.getenv(self.config.discord.token_env_var)
+        discord_token = None
+        if getattr(self.config, "mode", "discord") != "minecraft":
+            discord_token = os.getenv(self.config.discord.token_env_var)
 
         # Apply log level from config
         log_level = getattr(logging, self.config.logging.level)
@@ -200,17 +203,30 @@ class BotManager:
                     f"/memories/{self.bot_id}/global/watches.json"))
             logger.info("Watch manager initialized")
 
-        # Initialize Discord client (ties everything together)
-        self.client = DiscordClient(
-            config=self.config,
-            reactive_engine=reactive_engine,
-            agentic_engine=agentic_engine,
-            message_memory=self.message_memory,
-            user_cache=user_cache,
-            conversation_logger=conversation_logger,
-            memory_manager=memory_manager,
-        )
-        logger.info("Discord client initialized")
+        # Initialize connection client (Discord or Minecraft bridge)
+        mode = getattr(self.config, "mode", "discord")
+        if mode == "minecraft":
+            self.client = MinecraftClient(
+                config=self.config,
+                reactive_engine=reactive_engine,
+                agentic_engine=agentic_engine,
+                message_memory=self.message_memory,
+                user_cache=user_cache,
+                conversation_logger=conversation_logger,
+                memory_manager=memory_manager,
+            )
+            logger.info("Minecraft client initialized")
+        else:
+            self.client = DiscordClient(
+                config=self.config,
+                reactive_engine=reactive_engine,
+                agentic_engine=agentic_engine,
+                message_memory=self.message_memory,
+                user_cache=user_cache,
+                conversation_logger=conversation_logger,
+                memory_manager=memory_manager,
+            )
+            logger.info("Discord client initialized")
 
         # Wire up circular dependency: agentic engine needs client reference
         if agentic_engine:
@@ -222,27 +238,35 @@ class BotManager:
 
     async def run(self):
         """
-        Connect to Discord and run until interrupted.
+        Connect to Discord or Minecraft and run until interrupted.
         """
         logger = logging.getLogger(__name__)
 
         try:
-            discord_token = await self.initialize()
+            token = await self.initialize()
+            mode = getattr(self.config, "mode", "discord")
 
             # Schedule crash test if enabled
             if self.crash_test:
                 async def crash_after_delay():
-                    await asyncio.sleep(0.1)  # Reduced from 5s to minimal delay
+                    await asyncio.sleep(0.1)
                     logger.warning("CRASH TEST: Forcefully terminating in 1 second...")
-                    await asyncio.sleep(0.1)  # Reduced from 1s to minimal delay
+                    await asyncio.sleep(0.1)
                     logger.error("CRASH TEST: Simulating crash via os._exit(1)")
                     os._exit(1)
 
                 asyncio.create_task(crash_after_delay())
                 logger.warning("CRASH TEST MODE: Bot will crash in 6 seconds")
 
-            logger.info("Connecting to Discord...")
-            await self.client.start(discord_token)
+            if mode == "minecraft":
+                logger.info("Connecting to Minecraft via Mineflayer bridge...")
+                await self.client.start()
+                # Keep running until interrupted
+                while True:
+                    await asyncio.sleep(1)
+            else:
+                logger.info("Connecting to Discord...")
+                await self.client.start(token)
 
         except asyncio.CancelledError:
             logger.info("Shutdown requested")

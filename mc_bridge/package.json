@@ -1,0 +1,14 @@
+{
+  "name": "mc-bridge",
+  "version": "1.0.0",
+  "description": "Mineflayer bridge for Discord Agents - connects to Folia, exposes chat over stdio and actions over MCP HTTP",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js",
+    "auth": "node bridge.js --auth-only"
+  },
+  "dependencies": {
+    "mineflayer": "^4.20.1",
+    "mineflayer-pathfinder": "^2.9.4"
+  }
+}

@@ -183,6 +183,19 @@ class LoggingConfig:
 
 
 @dataclass
+class MinecraftConfig:
+    """Minecraft server and bot configuration"""
+    host: str = "localhost"
+    port: int = 25565
+    version: str = "1.26.2"
+    username: str = "ClaudeBot"
+    auth: str = "microsoft"  # microsoft | offline
+    spawn_radius_protection: int = 100
+    idle_autonomous_minutes: int = 5
+    mcp_port: int = 3001
+
+
+@dataclass
 class DiscordConfig:
     """Discord-specific configuration"""
     token_env_var: str = "DISCORD_BOT_TOKEN"  # Environment variable containing bot token
@@ -192,6 +205,22 @@ class DiscordConfig:
     allow_bot_interactions: bool = False  # Allow responding to other bots
     backfill_enabled: bool = True
     backfill_days: int = 30  # 0 = unlimited
+
+
+@dataclass
+class MinecraftConfig:
+    """Minecraft bridge configuration"""
+    host: str = "localhost"
+    port: int = 25565
+    username: str = ""  # Microsoft account email or username
+    auth: str = "microsoft"  # microsoft | mojang | offline
+    version: str = "1.26.2"
+    bot_name: str = ""  # In-game display name (defaults to username prefix)
+    server_name: str = "Minecraft Server"
+    mcp_port: int = 3001
+    spawn: Optional[dict] = None  # {"x": 0, "y": 64, "z": 0}
+    spawn_radius: int = 100
+    idle_threshold_seconds: int = 300  # 5 minutes before autonomous play
 
 
 @dataclass
@@ -206,8 +235,10 @@ class BotConfig:
     bot_id: str
     name: str
     description: str = ""
+    mode: str = "discord"  # discord | minecraft
 
     discord: DiscordConfig = field(default_factory=DiscordConfig)
+    minecraft: MinecraftConfig = field(default_factory=MinecraftConfig)
     personality: Optional[PersonalityConfig] = None
     reactive: ReactiveConfig = field(default_factory=ReactiveConfig)
     agentic: AgenticConfig = field(default_factory=AgenticConfig)
@@ -457,11 +488,29 @@ class BotConfig:
             ),
         )
 
+        # Parse minecraft config
+        minecraft_data = data.get("minecraft", {})
+        minecraft = MinecraftConfig(
+            host=minecraft_data.get("host", "localhost"),
+            port=minecraft_data.get("port", 25565),
+            username=minecraft_data.get("username", ""),
+            auth=minecraft_data.get("auth", "microsoft"),
+            version=minecraft_data.get("version", "1.26.2"),
+            bot_name=minecraft_data.get("bot_name", ""),
+            server_name=minecraft_data.get("server_name", "Minecraft Server"),
+            mcp_port=int(minecraft_data.get("mcp_port", 3001)),
+            spawn=minecraft_data.get("spawn"),
+            spawn_radius=int(minecraft_data.get("spawn_radius", 100)),
+            idle_threshold_seconds=int(minecraft_data.get("idle_threshold_seconds", 300)),
+        )
+
         return cls(
             bot_id=data["bot_id"],
             name=data["name"],
             description=data.get("description", ""),
+            mode=data.get("mode", "discord"),
             discord=discord,
+            minecraft=minecraft,
             personality=personality,
             reactive=reactive,
             agentic=agentic,

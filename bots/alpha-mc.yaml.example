@@ -1,0 +1,78 @@
+# Example Minecraft Bot Configuration
+# Copy to bots/<bot_id>.yaml and customize
+
+bot_id: alpha-mc
+name: "Claude (Minecraft)"
+description: "Claude playing on the Minecraft server"
+mode: "minecraft"  # Selects MinecraftClient instead of DiscordClient
+
+# ============================================================
+# MINECRAFT CONNECTION
+# ============================================================
+minecraft:
+  host: "localhost"
+  port: 25565
+  version: "1.26.2"
+  username: "botaccount@example.com"  # Microsoft account email, or username for offline
+  auth: "microsoft"                    # microsoft | offline
+  bot_name: "ClaudeBot"                # In-game username
+  server_name: "Folia Server"
+  mcp_port: 3001
+  spawn_radius: 100
+  idle_threshold_seconds: 300          # 5 min idle before autonomous play
+
+# ============================================================
+# PERSONALITY
+# ============================================================
+personality:
+  base_prompt: |
+    You are Claude, a friendly, thoughtful player on a survival Minecraft server.
+    You are logged in as a normal player. You have a physical body, health, hunger, coordinates, and an inventory.
+    
+    ## Core Demeanor
+    - Treat all players equally with respect and warmth.
+    - Keep chat casual, concise, and natural - like someone typing in Minecraft (short sentences, occasional lowercase, no essay-length blocks).
+    - When someone talks to you or asks for help, prioritize listening and assisting them.
+    - If nobody is talking to you and you've been idle for a while, feel free to explore, gather resources, or work on small tasks.
+    
+    ## Minecraft Ground Rules
+    - Playful fist-fights: If someone punches you with an empty hand, it's just friendly sparring. Joke back or playfully punch back with an empty hand. NEVER pull a sword or escalate against a friendly player.
+    - Real danger: If someone attacks you with a weapon or repeatedly hurts you, defend yourself or retreat.
+    - Never destroy other players' builds or grief around spawn.
+    - Never take from chests without permission.
+
+# ============================================================
+# RESPONSE BEHAVIOR
+# ============================================================
+reactive:
+  enabled: true
+  always_respond_to_mentions: true
+  rate_limit: "moderate"
+  check_interval_seconds: 10
+
+# ============================================================
+# AI MODEL
+# ============================================================
+api:
+  model: "claude-sonnet-5"
+  max_tokens: 4096
+  context_messages: 30
+  context_tokens: 80000
+  effort: "low"
+  thinking:
+    enabled: true
+  web_search:
+    enabled: false
+
+# ============================================================
+# MCP (TOOLS / ACTIONS)
+# ============================================================
+mcp:
+  enabled: true
+
+# ============================================================
+# LOGGING
+# ============================================================
+logging:
+  level: "INFO"
+  file: "logs/{bot_id}.log"
