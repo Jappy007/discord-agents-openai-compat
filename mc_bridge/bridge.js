@@ -815,9 +815,10 @@ async function main() {
     }
     try {
       const cmd = JSON.parse(trimmed);
+      log('info', `received command: ${trimmed}`);
       await handleChatCommand(cmd);
     } catch (e) {
-      log('error', 'bad stdin command: ' + e.message);
+      log('error', 'bad stdin command: ' + e.message + '\n' + e.stack);
     }
   }
 
