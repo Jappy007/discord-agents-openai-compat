@@ -447,7 +447,37 @@ function setupBotEvents() {
     if (!shuttingDown) scheduleReconnect();
   });
 
+  // In modern versions (1.19+ and especially ViaVersion), chat events often fire as 'message' (system/chat packets)
+  // or 'messagestr' instead of the legacy 'chat' event. Let's capture all of them!
+  bot.on('messagestr', (msg, position, jsonMsg) => {
+    log('info', `[RAW MESSAGE] (pos=${position}): ${msg}`);
+    if (position === 'game_info') return; // ignore actionbar
+    
+    // Parse typical chat formats: "<Player> Message" or "Player: Message" or "[Player] Message"
+    const match = msg.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
+                  msg.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/) ||
+                  msg.match(/^([a-zA-Z0-9_]{2,16})\s+whispers to you:\s+(.+)$/i) ||
+                  msg.match(/^([a-zA-Z0-9_]{2,16})\s+->\s+you:\s+(.+)$/i);
+
+    if (match) {
+      const username = match[1];
+      const message = match[2];
+      const isWhisper = /whisper|->/i.test(msg);
+      if (username === bot.username) return;
+
+      const player = bot.players[username];
+      emit({
+        type: 'chat',
+        player: username,
+        uuid: player ? player.uuid : username,
+        message: message,
+        whisper: isWhisper,
+      });
+    }
+  });
+
   bot.on('chat', (username, message, rawMessage, jsonMsg, matches) => {
+    log('info', `[CHAT EVENT] <${username}> ${message}`);
     if (username === bot.username) return;
     const player = bot.players[username];
     emit({
@@ -460,6 +490,7 @@ function setupBotEvents() {
   });
 
   bot.on('whisper', (username, message, rawMessage, jsonMsg) => {
+    log('info', `[WHISPER EVENT] <${username}> ${message}`);
     if (username === bot.username) return;
     const player = bot.players[username];
     emit({

@@ -296,6 +296,7 @@ class MinecraftClient:
         )
 
     async def _on_player_chat(self, player: str, uuid: str, text: str, whisper: bool):
+        logger.info(f"Incoming chat event from {player} (whisper={whisper}): {text}")
         self._last_activity = datetime.now(timezone.utc)
 
         if whisper:
@@ -351,6 +352,7 @@ class MinecraftClient:
 
         # Urgent = name mention or whisper.
         is_urgent = message.whisper or (self.bot_name.lower() in message.content.lower())
+        logger.info(f"Processing message content: '{message.content}' | is_urgent={is_urgent} | bot_name={self.bot_name}")
 
         if is_urgent:
             logger.info(f"Urgent message from {message.author.display_name}: {message.content[:60]}...")
