@@ -450,7 +450,7 @@ function setupBotEvents() {
   if (bot._client) {
     // Log EVERY incoming packet by name so we can see what's actually arriving
     bot._client.on('packet', (data, packetMeta) => {
-      // Ignore high-frequency noise packets (chunks, entity movement, time, light)
+      // Ignore high-frequency noise packets (chunks, entity movement, time, light, registries)
       const name = packetMeta.name;
       if (
         name.includes('entity') ||
@@ -463,7 +463,9 @@ function setupBotEvents() {
         name.includes('teleport') ||
         name.includes('head_rot') ||
         name.includes('look') ||
-        name.includes('rel_move')
+        name.includes('rel_move') ||
+        name.includes('registry') ||
+        name.includes('tags')
       ) {
         return;
       }
