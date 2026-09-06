@@ -2745,6 +2745,7 @@ class ReactiveEngine:
                     self.conversation_logger.log_separator()
                     await self._emit_turn_event(
                         "silent", message, result, triggers, scan_count=len(triggers))
+                    self._responded_messages.append(message.id)
                     return
 
                 # Staleness guard: generation takes tens of seconds and the
@@ -2764,6 +2765,7 @@ class ReactiveEngine:
                                 f"Discarding stale periodic response in {channel_id}: "
                                 f"conversation moved past target {message.id}"
                             )
+                            self._responded_messages.append(message.id)
                             return
                     except discord.HTTPException:
                         pass  # can't verify; send anyway
