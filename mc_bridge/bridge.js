@@ -134,8 +134,15 @@ function createBot() {
     options.session = cache;
   }
   log('info', `connecting to ${cfg.host}:${cfg.port} as ${cfg.username} (version ${cfg.version})`);
-  const b = mineflayer.createBot(options);
+  let b;
+  try {
+    b = mineflayer.createBot(options);
+  } catch (e) {
+    log('error', `Failed to create bot: ${e.message}\n${e.stack}`);
+    throw e;
+  }
   b.loadPlugin(pathfinder);
+  log('info', 'bot created and plugins loaded');
   return b;
 }
 
@@ -426,28 +433,37 @@ function setupBotEvents() {
   });
 
   bot.on('spawn', () => {
+    log('info', 'spawn event received');
     emit({ type: 'spawn', position: posKey(bot.entity.position) });
     emitStatus();
   });
 
   bot.on('error', (err) => {
-    log('error', 'mineflayer error: ' + err.message);
+    log('error', 'mineflayer error: ' + err.message + '\n' + (err.stack || ''));
   });
 
   bot.on('kicked', (reason) => {
     connected = false;
-    log('warn', 'kicked: ' + JSON.stringify(reason));
+    log('error', 'kicked: ' + JSON.stringify(reason));
     emit({ type: 'kicked', reason });
   });
 
   bot.on('end', () => {
     connected = false;
-    log('warn', 'connection ended');
+    log('error', 'connection ended unexpectedly');
     emit({ type: 'end' });
     if (!shuttingDown) scheduleReconnect();
   });
 
   if (bot._client) {
+    bot._client.on('error', (err) => {
+      log('error', 'minecraft client socket error: ' + err.message + '\n' + (err.stack || ''));
+    });
+
+    bot._client.on('connect', () => {
+      log('info', 'minecraft client connected to server socket');
+    });
+
     // Log EVERY incoming packet by name so we can see what's actually arriving
     bot._client.on('packet', (data, packetMeta) => {
       // Ignore high-frequency noise packets (chunks, entity movement, time, light, registries)
@@ -465,7 +481,8 @@ function setupBotEvents() {
         name.includes('look') ||
         name.includes('rel_move') ||
         name.includes('registry') ||
-        name.includes('tags')
+        name.includes('tags') ||
+        name.includes('recipe')
       ) {
         return;
       }
