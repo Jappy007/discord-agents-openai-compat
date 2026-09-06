@@ -187,6 +187,7 @@ class MinecraftClient:
     # ------------------------------------------------------------------
 
     async def _read_loop(self):
+        logger.info("_read_loop: started")
         while True:
             try:
                 line = await self._reader.readline()
@@ -203,7 +204,10 @@ class MinecraftClient:
                 continue
             try:
                 event = json.loads(text)
+                etype = event.get("type", "?")
+                logger.debug(f"_read_loop: dispatching {etype}")
                 await self._handle_bridge_event(event)
+                logger.debug(f"_read_loop: {etype} done")
             except json.JSONDecodeError:
                 logger.info(f"[bridge output] {text}")
 
@@ -330,6 +334,7 @@ class MinecraftClient:
 
     async def _on_system_event(self, text: str, uuid: str, player_name: str):
         logger.info(f"_on_system_event called: text={text}, uuid={uuid}, player={player_name}")
+        logger.info(f"_on_system_event: calling build_shim_message")
         message = build_shim_message(
             text=text,
             player_name=player_name,
@@ -345,25 +350,17 @@ class MinecraftClient:
 
     async def _process_message(self, message, store_only: bool = False):
         logger.info(f"_process_message: store_only={store_only}, author={message.author.name}")
-        # Store all messages (including bot's own if we ever emit them).
-        try:
-            await self.message_memory.add_message(message)
-            logger.info(f"_process_message: message_memory.add_message completed")
-        except Exception as e:
-            logger.error(f"Error storing message: {e}", exc_info=True)
-
-        # Update user cache with shim-compatible data.
-        try:
-            await self.user_cache.update_user(message.author, increment_messages=True)
-            logger.info(f"_process_message: user_cache.update_user completed")
-        except Exception as e:
-            logger.error(f"Error updating user cache: {e}", exc_info=True)
+        # Fire off storage in background so we never block the read loop
+        asyncio.create_task(self._bg_store(message))
+        logger.info(f"_process_message: queued background store for {message.author.name}")
 
         if store_only:
+            logger.info(f"_process_message: store_only -> skipping urgent/pending for {message.author.name}")
             return
 
         # Don't process bot's own messages.
         if message.author == self.user:
+            logger.debug(f"Skipping bot's own message {message.id}")
             return
 
         # Urgent = name mention or whisper.
@@ -372,14 +369,8 @@ class MinecraftClient:
 
         if is_urgent:
             logger.info(f"Urgent message from {message.author.display_name}: {message.content[:60]}...")
-            try:
-                await self.reactive_engine.handle_urgent(message)
-            except Exception as e:
-                logger.error(f"Error handling urgent message: {e}", exc_info=True)
-                try:
-                    await message.channel.send("something went sideways handling that - try again in a moment?")
-                except Exception:
-                    pass
+            # Handle LLM I/O off the bridge read-loop so chats never block
+            asyncio.create_task(self._handle_urgent_bg(message))
         else:
             channel_id = str(message.channel.id)
             message_id = message.id
@@ -388,6 +379,28 @@ class MinecraftClient:
                 f"Message {message_id} from {message.author.name} in "
                 f"#{message.channel.name} (stored, added to pending)"
             )
+
+    async def _bg_store(self, message):
+        try:
+            await self.message_memory.add_message(message)
+            logger.info(f"_bg_store: message_memory.add_message done for {message.author.name}")
+        except Exception as e:
+            logger.error(f"_bg_store add_message failed: {e}", exc_info=True)
+        try:
+            await self.user_cache.update_user(message.author, increment_messages=True)
+            logger.info(f"_bg_store: user_cache.update_user done for {message.author.name}")
+        except Exception as e:
+            logger.error(f"_bg_store update_user failed: {e}", exc_info=True)
+
+    async def _handle_urgent_bg(self, message):
+        try:
+            await self.reactive_engine.handle_urgent(message)
+        except Exception as e:
+            logger.error(f"Error handling urgent message: {e}", exc_info=True)
+            try:
+                await message.channel.send("something went sideways handling that - try again in a moment?")
+            except Exception:
+                pass
 
     def _get_dm_channel(self, player_name: str, uuid: str) -> MCChannel:
         if uuid not in self.dm_channels:

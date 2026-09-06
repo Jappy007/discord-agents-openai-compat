@@ -5,6 +5,7 @@ SQLite-based cache for quick user lookups. Reduces API calls.
 """
 
 import aiosqlite
+import asyncio
 import discord
 import logging
 from pathlib import Path
@@ -66,6 +67,7 @@ class UserCache:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db: Optional[aiosqlite.Connection] = None
+        self._lock = asyncio.Lock()
         # dm_channels: channel_id -> user_id reverse lookup (v0.9).
         # Populated from db on initialize(); kept hot by set_dm_channel().
         self._dm_by_channel: dict[str, str] = {}
@@ -101,62 +103,63 @@ class UserCache:
         if not self._db:
             raise RuntimeError("UserCache not initialized. Call initialize() first.")
 
-        now = datetime.utcnow().isoformat()
-        user_id = str(user.id)
-        avatar_url = str(user.avatar.url) if getattr(user, 'avatar', None) else ""
-        discriminator = getattr(user, 'discriminator', '0')
+        async with self._lock:
+            now = datetime.utcnow().isoformat()
+            user_id = str(user.id)
+            avatar_url = str(user.avatar.url) if getattr(user, 'avatar', None) else ""
+            discriminator = getattr(user, 'discriminator', '0')
 
-        try:
-            # Check for existing user
-            cursor = await self._db.execute(
-                "SELECT first_seen, message_count FROM users WHERE user_id = ?",
-                (user_id,)
-            )
-            existing = await cursor.fetchone()
-
-            if existing:
-                # Update existing
-                first_seen = existing['first_seen']
-                message_count = existing['message_count']
-                if increment_messages:
-                    message_count += 1
-
-                await self._db.execute(
-                    """
-                    UPDATE users
-                    SET username = ?, display_name = ?, discriminator = ?,
-                        is_bot = ?, avatar_url = ?, last_seen = ?,
-                        message_count = ?, updated_at = ?
-                    WHERE user_id = ?
-                    """,
-                    (
-                        user.name, user.display_name, discriminator,
-                        user.bot, avatar_url, now,
-                        message_count, now, user_id,
-                    ),
+            try:
+                # Check for existing user
+                cursor = await self._db.execute(
+                    "SELECT first_seen, message_count FROM users WHERE user_id = ?",
+                    (user_id,)
                 )
-            else:
-                # Insert new
-                await self._db.execute(
-                    """
-                    INSERT INTO users (
-                        user_id, username, display_name, discriminator,
-                        is_bot, avatar_url, first_seen, last_seen,
-                        message_count, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        user_id, user.name, user.display_name, discriminator,
-                        user.bot, avatar_url, now, now,
-                        1 if increment_messages else 0, now,
-                    ),
-                )
+                existing = await cursor.fetchone()
 
-            await self._db.commit()
-            logger.debug(f"Updated user cache: {user.name}")
+                if existing:
+                    # Update existing
+                    first_seen = existing['first_seen']
+                    message_count = existing['message_count']
+                    if increment_messages:
+                        message_count += 1
 
-        except Exception as e:
-            logger.error(f"Error updating user cache: {e}", exc_info=True)
+                    await self._db.execute(
+                        """
+                        UPDATE users
+                        SET username = ?, display_name = ?, discriminator = ?,
+                            is_bot = ?, avatar_url = ?, last_seen = ?,
+                            message_count = ?, updated_at = ?
+                        WHERE user_id = ?
+                        """,
+                        (
+                            user.name, user.display_name, discriminator,
+                            user.bot, avatar_url, now,
+                            message_count, now, user_id,
+                        ),
+                    )
+                else:
+                    # Insert new
+                    await self._db.execute(
+                        """
+                        INSERT INTO users (
+                            user_id, username, display_name, discriminator,
+                            is_bot, avatar_url, first_seen, last_seen,
+                            message_count, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user_id, user.name, user.display_name, discriminator,
+                            user.bot, avatar_url, now, now,
+                            1 if increment_messages else 0, now,
+                        ),
+                    )
+
+                await self._db.commit()
+                logger.debug(f"Updated user cache: {user.name}")
+
+            except Exception as e:
+                logger.error(f"Error updating user cache: {e}", exc_info=True)
 
     async def get_user(self, user_id: str) -> Optional[CachedUser]:
         """Get cached user information"""

@@ -6,6 +6,7 @@ Handles Discord message storage, updates, and retrieval.
 """
 
 import aiosqlite
+import asyncio
 import sqlite3
 import discord
 import json
@@ -128,6 +129,7 @@ class MessageMemory:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db: Optional[aiosqlite.Connection] = None
+        self._lock = asyncio.Lock()
         self._thread_parents: dict = {}
         self._threads_by_parent: dict = {}
         self._thread_meta: dict = {}  # tid -> (parent, name, archived); upsert no-op guard
@@ -284,108 +286,109 @@ class MessageMemory:
         if not self._db:
             raise RuntimeError("MessageMemory not initialized. Call initialize() first.")
 
-        mentions = [str(user.id) for user in message.mentions]
-        mentions_json = json.dumps(mentions)
+        async with self._lock:
+            mentions = [str(user.id) for user in message.mentions]
+            mentions_json = json.dumps(mentions)
 
-        # Extract content from message and embeds
-        content_parts = []
-        if message.content:
-            content_parts.append(message.content)
+            # Extract content from message and embeds
+            content_parts = []
+            if message.content:
+                content_parts.append(message.content)
 
-        # Check for forwarded messages (Discord API limitation)
-        if message.reference:
-            ref_type = getattr(message.reference, 'type', None)
-            if ref_type is not None:
-                from discord import MessageReferenceType
-                if ref_type == MessageReferenceType.forward:
-                    # Discord doesn't provide forwarded content via API
-                    content_parts.append("[Forwarded message - content not accessible]")
-                    logger.debug(f"Message {message.id} is a forwarded message")
+            # Check for forwarded messages (Discord API limitation)
+            if message.reference:
+                ref_type = getattr(message.reference, 'type', None)
+                if ref_type is not None:
+                    from discord import MessageReferenceType
+                    if ref_type == MessageReferenceType.forward:
+                        # Discord doesn't provide forwarded content via API
+                        content_parts.append("[Forwarded message - content not accessible]")
+                        logger.debug(f"Message {message.id} is a forwarded message")
 
-        # Extract embed content
-        if message.embeds:
-            logger.info(f"[EMBED] Message {message.id} has {len(message.embeds)} embeds")
-            for idx, embed in enumerate(message.embeds):
-                has_title = bool(embed.title)
-                has_desc = bool(embed.description)
-                logger.info(f"  [EMBED] Embed {idx}: type={embed.type}, title={has_title}, desc={has_desc}, fields={len(embed.fields)}")
+            # Extract embed content
+            if message.embeds:
+                logger.info(f"[EMBED] Message {message.id} has {len(message.embeds)} embeds")
+                for idx, embed in enumerate(message.embeds):
+                    has_title = bool(embed.title)
+                    has_desc = bool(embed.description)
+                    logger.info(f"  [EMBED] Embed {idx}: type={embed.type}, title={has_title}, desc={has_desc}, fields={len(embed.fields)}")
 
-                if has_title:
-                    logger.info(f"    Title: {embed.title[:100]}")
-                if has_desc:
-                    logger.info(f"    Description: {embed.description[:100]}")
+                    if has_title:
+                        logger.info(f"    Title: {embed.title[:100]}")
+                    if has_desc:
+                        logger.info(f"    Description: {embed.description[:100]}")
 
-                if embed.description:
-                    content_parts.append(embed.description)
-                if embed.title:
-                    content_parts.append(embed.title)
-                for field in embed.fields:
-                    if field.value:
-                        content_parts.append(field.value)
+                    if embed.description:
+                        content_parts.append(embed.description)
+                    if embed.title:
+                        content_parts.append(embed.title)
+                    for field in embed.fields:
+                        if field.value:
+                            content_parts.append(field.value)
 
-        full_content = "\n".join(content_parts)
-        if message.embeds and not message.content:
-            logger.info(f"[EMBED] Message {message.id} is embed-only, extracted content length: {len(full_content)}")
-        elif not message.content and not content_parts:
-            logger.warning(f"[EMPTY] Message {message.id} has NO content (no text, no embeds with content)")
+            full_content = "\n".join(content_parts)
+            if message.embeds and not message.content:
+                logger.info(f"[EMBED] Message {message.id} is embed-only, extracted content length: {len(full_content)}")
+            elif not message.content and not content_parts:
+                logger.warning(f"[EMPTY] Message {message.id} has NO content (no text, no embeds with content)")
 
-        try:
-            await self._db.execute(
-                """
-                INSERT INTO messages (
-                    message_id, channel_id, guild_id,
-                    author_id, author_name, content,
-                    timestamp, is_bot, has_attachments, mentions
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(message.id),
-                    str(message.channel.id),
-                    str(message.guild.id) if message.guild else "DM",
-                    str(message.author.id),
-                    message.author.display_name,
-                    full_content,
-                    message.created_at.isoformat(),
-                    message.author.bot,
-                    len(message.attachments) > 0,
-                    mentions_json,
-                ),
-            )
-            await self._db.commit()
-            logger.debug(f"Stored message {message.id} from {message.author.name}")
-
-        except aiosqlite.IntegrityError:
-            # Message exists - check if content changed before updating
-            cursor = await self._db.execute(
-                "SELECT content FROM messages WHERE message_id = ?",
-                (str(message.id),)
-            )
-            row = await cursor.fetchone()
-            existing_content = row[0] if row else None
-
-            # Only update if content actually changed
-            if existing_content != full_content:
-                logger.info(f"[UPSERT] Message {message.id} content CHANGED during backfill")
-                logger.info(f"[UPSERT] OLD: {existing_content[:100]}...")
-                logger.info(f"[UPSERT] NEW: {full_content[:100]}...")
+            try:
                 await self._db.execute(
                     """
-                    UPDATE messages
-                    SET content = ?, has_attachments = ?, mentions = ?, author_name = ?
-                    WHERE message_id = ?
+                    INSERT INTO messages (
+                        message_id, channel_id, guild_id,
+                        author_id, author_name, content,
+                        timestamp, is_bot, has_attachments, mentions
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        str(message.id),
+                        str(message.channel.id),
+                        str(message.guild.id) if message.guild else "DM",
+                        str(message.author.id),
+                        message.author.display_name,
                         full_content,
+                        message.created_at.isoformat(),
+                        message.author.bot,
                         len(message.attachments) > 0,
                         mentions_json,
-                        message.author.display_name,
-                        str(message.id),
                     ),
                 )
                 await self._db.commit()
-                logger.info(f"[UPSERT] Successfully updated message {message.id}")
-            else:
-                logger.debug(f"Message {message.id} unchanged, skipping update")
+                logger.debug(f"Stored message {message.id} from {message.author.name}")
+
+            except aiosqlite.IntegrityError:
+                # Message exists - check if content changed before updating
+                cursor = await self._db.execute(
+                    "SELECT content FROM messages WHERE message_id = ?",
+                    (str(message.id),)
+                )
+                row = await cursor.fetchone()
+                existing_content = row[0] if row else None
+
+                # Only update if content actually changed
+                if existing_content != full_content:
+                    logger.info(f"[UPSERT] Message {message.id} content CHANGED during backfill")
+                    logger.info(f"[UPSERT] OLD: {existing_content[:100]}...")
+                    logger.info(f"[UPSERT] NEW: {full_content[:100]}...")
+                    await self._db.execute(
+                        """
+                        UPDATE messages
+                        SET content = ?, has_attachments = ?, mentions = ?, author_name = ?
+                        WHERE message_id = ?
+                        """,
+                        (
+                            full_content,
+                            len(message.attachments) > 0,
+                            mentions_json,
+                            message.author.display_name,
+                            str(message.id),
+                        ),
+                    )
+                    await self._db.commit()
+                    logger.info(f"[UPSERT] Successfully updated message {message.id}")
+                else:
+                    logger.debug(f"Message {message.id} unchanged, skipping update")
 
     async def update_message(self, message: discord.Message):
         """
