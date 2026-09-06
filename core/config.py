@@ -539,10 +539,11 @@ class BotConfig:
             errors.append("name is required and cannot be empty")
 
         # Environment variable checks
-        if not self.discord.token_env_var:
-            errors.append("discord.token_env_var is required")
-        elif not os.getenv(self.discord.token_env_var):
-            errors.append(f"Missing environment variable: {self.discord.token_env_var}")
+        if getattr(self, "mode", "discord") != "minecraft":
+            if not self.discord.token_env_var:
+                errors.append("discord.token_env_var is required")
+            elif not os.getenv(self.discord.token_env_var):
+                errors.append(f"Missing environment variable: {self.discord.token_env_var}")
 
         provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
         if provider == "anthropic":
@@ -557,12 +558,13 @@ class BotConfig:
             errors.append(f"Unknown LLM_PROVIDER '{provider}' - expected 'anthropic' or 'openai_compatible'")
 
         # Type validation
-        if not isinstance(self.discord.servers, list):
-            errors.append("discord.servers must be a list")
+        if getattr(self, "mode", "discord") != "minecraft":
+            if not isinstance(self.discord.servers, list):
+                errors.append("discord.servers must be a list")
 
-        # Warn for empty servers (not error, just warning)
-        if not self.discord.servers:
-            logging.warning(f"[{self.bot_id}] No servers configured - bot won't join any servers")
+            # Warn for empty servers (not error, just warning)
+            if not self.discord.servers:
+                logging.warning(f"[{self.bot_id}] No servers configured - bot won't join any servers")
 
         # Validate API config
         if self.api.max_tokens <= 0:
