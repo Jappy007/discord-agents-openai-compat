@@ -115,12 +115,14 @@ class MinecraftClient:
         logger.info(f"Starting Mineflayer bridge for {cfg.username} on {cfg.host}:{cfg.port}")
         import shutil
         node_path = shutil.which("node") or "/usr/bin/node"
+        
+        # Stream both stdout and stderr live to main python logging
         self._process = await asyncio.create_subprocess_exec(
             node_path,
             str(bridge_js),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,  # Merge stderr into stdout so we don't miss anything!
             cwd=str(bridge_dir),
             env=env,
         )
@@ -134,7 +136,7 @@ class MinecraftClient:
         await self._writer.drain()
 
         self._read_task = asyncio.create_task(self._read_loop())
-        self._err_task = asyncio.create_task(self._err_loop())
+        
         self._idle_task = asyncio.create_task(self._idle_loop())
 
         # Seed reactive engine list_servers / resolver with fake guild.
@@ -193,25 +195,15 @@ class MinecraftClient:
             if not line:
                 await asyncio.sleep(0.1)
                 continue
-            try:
-                event = json.loads(line.decode().strip())
-            except json.JSONDecodeError:
-                continue
-            await self._handle_bridge_event(event)
-
-    async def _err_loop(self):
-        while True:
-            try:
-                line = await self._process.stderr.readline()
-            except Exception:
-                await asyncio.sleep(1)
-                continue
-            if not line:
-                await asyncio.sleep(0.1)
-                continue
             text = line.decode().strip()
-            if text:
-                logger.info(f"[bridge stderr] {text}")
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+                await self._handle_bridge_event(event)
+            except json.JSONDecodeError:
+                logger.info(f"[bridge output] {text}")
+
 
     async def _handle_bridge_event(self, event):
         etype = event.get("type")
