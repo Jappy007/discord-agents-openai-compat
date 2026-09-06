@@ -232,6 +232,7 @@ class MinecraftClient:
             return
 
         if etype == "chat":
+            logger.info(f"Bridge received chat event: {event}")
             await self._on_player_chat(
                 player=event["player"],
                 uuid=event.get("uuid") or event["player"],
@@ -241,6 +242,7 @@ class MinecraftClient:
             return
 
         if etype == "join":
+            logger.info(f"Bridge received join event: {event}")
             await self._on_system_event(
                 f"[Player {event['player']} joined the server]",
                 event.get("uuid") or event["player"],
@@ -249,6 +251,7 @@ class MinecraftClient:
             return
 
         if etype == "leave":
+            logger.info(f"Bridge received leave event: {event}")
             await self._on_system_event(
                 f"[Player {event['player']} left the server]",
                 event.get("uuid") or event["player"],
