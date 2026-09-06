@@ -195,8 +195,9 @@ class MinecraftClient:
                 await asyncio.sleep(1)
                 continue
             if not line:
-                await asyncio.sleep(0.1)
-                continue
+                logger.warning("Bridge process closed, breaking read loop")
+                break
+
             text = line.decode().strip()
             if not text:
                 continue
