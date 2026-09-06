@@ -574,8 +574,9 @@ function setupBotEvents() {
 
         // Filter out system messages (join/leave, etc.) - these have translate keys
         // and don't represent actual player chat
-        if (raw && raw.translate && /multiplayer\.player\.(joined|left)|commands\.|chat\.type/.test(raw.translate)) {
-          log('info', `[SYSTEM_CHAT SKIPPED]: system message (translate=${raw.translate})`);
+        const translationKey = getTranslateKey(raw);
+        if (translationKey && /multiplayer\.player\.(joined|left)|commands\./.test(translationKey)) {
+          log('info', `[SYSTEM_CHAT SKIPPED]: system message (translate=${translationKey})`);
           return;
         }
 
