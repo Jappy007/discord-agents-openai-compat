@@ -448,18 +448,26 @@ function setupBotEvents() {
   });
 
   if (bot._client) {
-    // Log ALL incoming packets to find the chat packet name
+    // Log EVERY incoming packet by name so we can see what's actually arriving
     bot._client.on('packet', (data, packetMeta) => {
-      log('info', `[ALL PACKET] ${packetMeta.name}`);
+      // Ignore high-frequency noise packets (chunks, entity movement, time, light)
+      const name = packetMeta.name;
       if (
-        packetMeta.name.includes('chat') ||
-        packetMeta.name.includes('message') ||
-        packetMeta.name.includes('disguised') ||
-        packetMeta.name.includes('command') ||
-        packetMeta.name.includes('profile')
+        name.includes('entity') ||
+        name.includes('chunk') ||
+        name.includes('light') ||
+        name.includes('sound') ||
+        name.includes('particle') ||
+        name.includes('time') ||
+        name.includes('block') ||
+        name.includes('teleport') ||
+        name.includes('head_rot') ||
+        name.includes('look') ||
+        name.includes('rel_move')
       ) {
-        log('info', `[PACKET ${packetMeta.name}]: ${JSON.stringify(data)}`);
+        return;
       }
+      log('info', `[PKT: ${name}]: ${JSON.stringify(data)}`);
     });
 
     // Helper to recursively pull ONLY chat text out of prismarine NBT compound/list objects
