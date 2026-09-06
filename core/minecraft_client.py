@@ -371,7 +371,7 @@ class MinecraftClient:
             return
 
         # Don't process bot's own messages.
-        if message.author == self.user:
+        if message.author.name.lower() == self.bot_name.lower():
             logger.debug(f"Skipping bot's own message {message.id}")
             return
 

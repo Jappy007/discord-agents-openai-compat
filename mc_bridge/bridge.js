@@ -641,9 +641,10 @@ function setupBotEvents() {
           for (let i = 0; i < strings.length - 1; i++) {
             const candidateUser = strings[i];
             const candidateMsg = strings[i+1];
-            if (candidateUser && candidateUser.length >= 2 && candidateUser.length <= 16 && /^[a-zA-Z0-9_]+$/.test(candidateUser)) {
-              if (candidateUser !== bot.username && candidateMsg && candidateMsg !== candidateUser) {
-                log('info', `[CHAT RECOVERED FROM NBT]: user=${candidateUser} msg=${candidateMsg}`);
+        if (candidateUser && candidateUser.length >= 2 && candidateUser.length <= 16 && /^[a-zA-Z0-9_]+$/.test(candidateUser)) {
+          if (candidateUser.toLowerCase() !== bot.username.toLowerCase() && candidateMsg && candidateMsg !== candidateUser) {
+            log('info', `[CHAT RECOVERED FROM NBT]: user=${candidateUser} msg=${candidateMsg}`);
+
                 const player = bot.players[candidateUser];
                 emit({
                   type: 'chat',
@@ -661,7 +662,7 @@ function setupBotEvents() {
         // Fallback regex match
         const match = fullText.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
                       fullText.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/);
-        if (match && match[1] !== bot.username) {
+        if (match && match[1].toLowerCase() !== bot.username.toLowerCase()) {
           emit({
             type: 'chat',
             player: match[1],
@@ -692,10 +693,11 @@ function setupBotEvents() {
     if (match) {
       const username = match[1];
       const message = match[2];
-      const isWhisper = /whisper|->/i.test(msg);
-      if (username === bot.username) return;
+    const isWhisper = /whisper|->/i.test(msg);
+    if (username.toLowerCase() === bot.username.toLowerCase()) return;
 
-      const player = bot.players[username];
+    const player = bot.players[username];
+
       emit({
         type: 'chat',
         player: username,
@@ -708,7 +710,7 @@ function setupBotEvents() {
 
   bot.on('chat', (username, message, rawMessage, jsonMsg, matches) => {
     log('info', `[CHAT EVENT] <${username}> ${message}`);
-    if (username === bot.username) return;
+    if (username.toLowerCase() === bot.username.toLowerCase()) return;
     const player = bot.players[username];
     emit({
       type: 'chat',
@@ -721,7 +723,7 @@ function setupBotEvents() {
 
   bot.on('whisper', (username, message, rawMessage, jsonMsg) => {
     log('info', `[WHISPER EVENT] <${username}> ${message}`);
-    if (username === bot.username) return;
+    if (username.toLowerCase() === bot.username.toLowerCase()) return;
     const player = bot.players[username];
     emit({
       type: 'chat',
