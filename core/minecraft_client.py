@@ -113,9 +113,8 @@ class MinecraftClient:
         }
 
         logger.info(f"Starting Mineflayer bridge for {cfg.username} on {cfg.host}:{cfg.port}")
-        node_path = "/usr/bin/node"
-        if not os.path.exists(node_path):
-            node_path = "node"
+        import shutil
+        node_path = shutil.which("node") or "/usr/bin/node"
         self._process = await asyncio.create_subprocess_exec(
             node_path,
             str(bridge_js),
@@ -129,8 +128,9 @@ class MinecraftClient:
         self._reader = self._process.stdout
         self._writer = self._process.stdin
 
-        # Send bridge config as first line.
+        # Send bridge config as first line and flush.
         self._write_stdin(json.dumps(bridge_config))
+        await self._writer.drain()
 
         self._read_task = asyncio.create_task(self._read_loop())
         self._idle_task = asyncio.create_task(self._idle_loop())
