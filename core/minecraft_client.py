@@ -128,6 +128,8 @@ class MinecraftClient:
         )
 
         self._reader = self._process.stdout
+        # Increase read buffer limit to 10MB to handle large bridge chunks
+        self._reader._limit = 10 * 1024 * 1024
         self._writer = self._process.stdin
 
         # Send bridge config as first line and flush.
