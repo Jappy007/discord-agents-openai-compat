@@ -244,6 +244,8 @@ class MinecraftClient:
 
         if etype == "join":
             logger.info(f"Bridge received join event: {event}")
+            if event.get("player") == self.bot_name:
+                return
             await self._on_system_event(
                 f"[Player {event['player']} joined the server]",
                 event.get("uuid") or event["player"],
@@ -253,6 +255,8 @@ class MinecraftClient:
 
         if etype == "leave":
             logger.info(f"Bridge received leave event: {event}")
+            if event.get("player") == self.bot_name:
+                return
             await self._on_system_event(
                 f"[Player {event['player']} left the server]",
                 event.get("uuid") or event["player"],
@@ -325,6 +329,7 @@ class MinecraftClient:
         await self._process_message(message)
 
     async def _on_system_event(self, text: str, uuid: str, player_name: str):
+        logger.info(f"_on_system_event called: text={text}, uuid={uuid}, player={player_name}")
         message = build_shim_message(
             text=text,
             player_name=player_name,
@@ -334,20 +339,25 @@ class MinecraftClient:
             guild=self.guild,
             event_type="system",
         )
+        logger.info(f"_on_system_event: built message, calling _process_message")
         await self._process_message(message, store_only=True)
+        logger.info(f"_on_system_event: _process_message completed")
 
     async def _process_message(self, message, store_only: bool = False):
+        logger.info(f"_process_message: store_only={store_only}, author={message.author.name}")
         # Store all messages (including bot's own if we ever emit them).
         try:
             await self.message_memory.add_message(message)
+            logger.info(f"_process_message: message_memory.add_message completed")
         except Exception as e:
-            logger.error(f"Error storing message: {e}")
+            logger.error(f"Error storing message: {e}", exc_info=True)
 
         # Update user cache with shim-compatible data.
         try:
             await self.user_cache.update_user(message.author, increment_messages=True)
+            logger.info(f"_process_message: user_cache.update_user completed")
         except Exception as e:
-            logger.error(f"Error updating user cache: {e}")
+            logger.error(f"Error updating user cache: {e}", exc_info=True)
 
         if store_only:
             return

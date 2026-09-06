@@ -703,12 +703,16 @@ function setupBotEvents() {
 
   bot.on('playerJoined', (player) => {
     onlinePlayers.set(player.uuid, { name: player.username, position: player.entity ? player.entity.position : null });
-    emit({ type: 'join', player: player.username, uuid: player.uuid });
+    if (player.username !== bot.username) {
+        emit({ type: 'join', player: player.username, uuid: player.uuid });
+    }
   });
 
   bot.on('playerLeft', (player) => {
     onlinePlayers.delete(player.uuid);
-    emit({ type: 'leave', player: player.username, uuid: player.uuid });
+    if (player.username !== bot.username) {
+        emit({ type: 'leave', player: player.username, uuid: player.uuid });
+    }
   });
 
   bot.on('death', () => {

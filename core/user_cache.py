@@ -103,7 +103,7 @@ class UserCache:
 
         now = datetime.utcnow().isoformat()
         user_id = str(user.id)
-        avatar_url = str(user.avatar.url) if user.avatar else ""
+        avatar_url = str(user.avatar.url) if getattr(user, 'avatar', None) else ""
         discriminator = getattr(user, 'discriminator', '0')
 
         try:
