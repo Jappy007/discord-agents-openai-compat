@@ -129,10 +129,12 @@ class MinecraftClient:
         self._writer = self._process.stdin
 
         # Send bridge config as first line and flush.
+        logger.info(f"Sending config to bridge: {json.dumps(bridge_config)}")
         self._write_stdin(json.dumps(bridge_config))
         await self._writer.drain()
 
         self._read_task = asyncio.create_task(self._read_loop())
+        self._err_task = asyncio.create_task(self._err_loop())
         self._idle_task = asyncio.create_task(self._idle_loop())
 
         # Seed reactive engine list_servers / resolver with fake guild.
@@ -196,6 +198,20 @@ class MinecraftClient:
             except json.JSONDecodeError:
                 continue
             await self._handle_bridge_event(event)
+
+    async def _err_loop(self):
+        while True:
+            try:
+                line = await self._process.stderr.readline()
+            except Exception:
+                await asyncio.sleep(1)
+                continue
+            if not line:
+                await asyncio.sleep(0.1)
+                continue
+            text = line.decode().strip()
+            if text:
+                logger.info(f"[bridge stderr] {text}")
 
     async def _handle_bridge_event(self, event):
         etype = event.get("type")
