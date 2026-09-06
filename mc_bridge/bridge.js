@@ -31,6 +31,7 @@ let shuttingDown = false;
 const onlinePlayers = new Map(); // uuid -> {name, lastSeen}
 const aggression = new Map();    // uuid -> {weaponHits, fistHits, lastSwing}
 const ownPlaced = new Set();     // "x,y,z" keys
+const recentMessages = new Set(); // "player:message"
 
 const NEVER_TOUCH_BLOCKS = new Set([
   'chest', 'trapped_chest', 'ender_chest', 'barrel',
@@ -90,6 +91,12 @@ function getTranslateKey(obj) {
 }
 
 function emit(event) {
+  if (event.type === 'chat') {
+    const key = `${event.player}:${event.message}`;
+    if (recentMessages.has(key)) return;
+    recentMessages.add(key);
+    setTimeout(() => recentMessages.delete(key), 5000);
+  }
   console.log(JSON.stringify(event));
 }
 
