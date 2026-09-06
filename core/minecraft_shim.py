@@ -44,7 +44,6 @@ class MCGuild:
     """Fake Discord guild representing the Minecraft server."""
 
     def __init__(self, guild_id: str, name: str, me: MCUser):
-        # Allow non-numeric guild ids (e.g. "minecraft")
         try:
             self.id = int(guild_id)
         except ValueError:
@@ -53,6 +52,11 @@ class MCGuild:
         self.me = me
         self.member_count = 0
         self._members = {}
+        self.text_channels = []
+        self.voice_channels = []
+        self.text_channels = []
+        self.voice_channels = []
+        self.threads = []
 
     def get_member(self, user_id):
         return self._members.get(str(user_id))

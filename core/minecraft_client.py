@@ -113,8 +113,11 @@ class MinecraftClient:
         }
 
         logger.info(f"Starting Mineflayer bridge for {cfg.username} on {cfg.host}:{cfg.port}")
+        node_path = "/usr/bin/node"
+        if not os.path.exists(node_path):
+            node_path = "node"
         self._process = await asyncio.create_subprocess_exec(
-            sys.executable.replace("python", "node") if sys.executable.endswith("python") else "node",
+            node_path,
             str(bridge_js),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

@@ -289,7 +289,8 @@ class BotManager:
                 offline_time = datetime.utcnow()
 
                 for guild in self.client.guilds:
-                    for channel in guild.text_channels:
+                    channels = getattr(guild, 'text_channels', [])
+                    for channel in channels:
                         try:
                             await self.message_memory.insert_system_message(
                                 content="[YOU WENT OFFLINE]",
