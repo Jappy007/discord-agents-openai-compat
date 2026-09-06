@@ -77,3 +77,4 @@ core/import_analysis.py
 import_analysis_report.txt
 PLAN-minecraft-bridge.md
 mc_bridge/.minecraft/e16cf3_live-cache.json
+/.openhands

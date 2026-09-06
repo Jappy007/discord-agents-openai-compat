@@ -44,6 +44,11 @@ class MCUser:
     def __hash__(self):
         return hash(self.uuid)
 
+    @property
+    def mention(self):
+        """Discord-compatible mention string."""
+        return f"<@{self.id}>"
+
 
 class MCGuild:
     """Fake Discord guild representing the Minecraft server."""
@@ -87,6 +92,10 @@ class MCChannel:
         self._send = send_callback
         self.guild = guild
         self.recipient = recipient
+        # In-memory ring of recent messages so fetch_message/history work
+        # without a Minecraft history API (message_id -> MCMessage, oldest first)
+        self._messages = {}
+        self._max_ring = 2000
 
     async def send(self, content: str, **kwargs):
         """Send chat to the bridge. Re-chunks to Minecraft's 256 char limit."""
@@ -109,14 +118,48 @@ class MCChannel:
             await self._send(chunk)
             await asyncio.sleep(0.4)
 
-    async def typing(self):
+    def remember(self, message: "MCMessage"):
+        """Register a message in the ring (called by MinecraftClient)."""
+        self._messages[message.id] = message
+        if len(self._messages) > self._max_ring:
+            for old_id in list(self._messages.keys())[:len(self._messages) - self._max_ring]:
+                del self._messages[old_id]
+
+    def typing(self):
         """No-op context manager (Minecraft has no typing indicator)."""
-        class _CM:
-            async def __aenter__(self):
-                return self
-            async def __aexit__(self, *args):
-                pass
-        return _CM()
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def _cm():
+            yield
+        return _cm()
+
+    async def fetch_message(self, message_id: int):
+        """Look up a message in the ring (no Minecraft message-history API)."""
+        msg = self._messages.get(int(message_id))
+        if msg is None:
+            raise LookupError(f"fetch_message: message {message_id} not in {self.name}")
+        return msg
+
+    async def history(self, *args, **kwargs):
+        """Yield ring messages like discord.py history - newest first by default."""
+        limit = kwargs.get("limit")
+        after = kwargs.get("after")
+        before = kwargs.get("before")
+        oldest_first = kwargs.get("oldest_first", False)
+        msgs = list(self._messages.values())
+        if after is not None:
+            if isinstance(after, datetime):
+                msgs = [m for m in msgs if m.created_at > after]
+            else:
+                msgs = [m for m in msgs if m.id > int(after)]
+        if before is not None:
+            if isinstance(before, datetime):
+                msgs = [m for m in msgs if m.created_at < before]
+            else:
+                msgs = [m for m in msgs if m.id < int(before)]
+        ordered = msgs if oldest_first else list(reversed(msgs))
+        for m in ordered[:limit] if limit else ordered:
+            yield m
 
 
 @dataclass
@@ -135,6 +178,7 @@ class MCMessage:
     reference: Optional[Any] = None
     whisper: bool = False
     event_type: Optional[str] = None
+    reactions: List[Any] = field(default_factory=list)  # Minecraft has no reactions
 
     @property
     def jump_url(self):

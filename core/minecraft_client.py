@@ -65,6 +65,8 @@ class MinecraftClient:
             guild=self.guild,
         )
         self.dm_channels = {}  # player_uuid -> MCChannel
+        # int id -> MCChannel registry so any client can resolve a channel id
+        self._channels_by_id = {self.public_channel.id: self.public_channel}
 
         self._process: Optional[subprocess.Process] = None
         self._reader: Optional[asyncio.StreamReader] = None
@@ -140,6 +142,12 @@ class MinecraftClient:
         self._read_task = asyncio.create_task(self._read_loop())
         
         self._idle_task = asyncio.create_task(self._idle_loop())
+
+        # Give reactive engine access to this client (periodic checks, bot id)
+        self.reactive_engine.discord_client = self
+
+        # Start periodic conversation scanning
+        self.reactive_engine.start_periodic_check()
 
         # Seed reactive engine list_servers / resolver with fake guild.
         self.reactive_engine.list_servers = lambda: [self.guild.name]
@@ -352,6 +360,8 @@ class MinecraftClient:
 
     async def _process_message(self, message, store_only: bool = False):
         logger.info(f"_process_message: store_only={store_only}, author={message.author.name}")
+        # Remember in channel ring so periodic-check can fetch it
+        message.channel.remember(message)
         # Fire off storage in background so we never block the read loop
         asyncio.create_task(self._bg_store(message))
         logger.info(f"_process_message: queued background store for {message.author.name}")
@@ -407,13 +417,15 @@ class MinecraftClient:
     def _get_dm_channel(self, player_name: str, uuid: str) -> MCChannel:
         if uuid not in self.dm_channels:
             recipient = MCUser(uuid, player_name)
-            self.dm_channels[uuid] = MCChannel(
+            channel = MCChannel(
                 channel_id=f"minecraft:dm:{uuid}",
                 name=f"DM · {player_name}",
                 send_callback=lambda text, p=player_name: self._send_whisper(p, text),
                 guild=None,
                 recipient=recipient,
             )
+            self.dm_channels[uuid] = channel
+            self._channels_by_id[channel.id] = channel
         return self.dm_channels[uuid]
 
     # ------------------------------------------------------------------
@@ -458,3 +470,7 @@ class MinecraftClient:
         if str(guild_id) == "minecraft":
             return self.guild
         return None
+
+    def get_channel(self, channel_id):
+        """Resolve an int channel id to its MCChannel (periodic-check path)."""
+        return self._channels_by_id.get(int(channel_id))
