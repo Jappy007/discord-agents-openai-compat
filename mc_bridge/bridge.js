@@ -536,7 +536,7 @@ function setupBotEvents() {
 
     // 2. Handle player_chat (1.19+ signed chat packet)
     bot._client.on('player_chat', (data) => {
-      log('info', `[PLAYER_CHAT]: ${JSON.stringify(data)}`);
+      log('info', `[PLAYER_CHAT RAW]: ${JSON.stringify(data)}`);
       try {
         const senderUuid = data.sender;
         const playerObj = bot.players[senderUuid] || Object.values(bot.players).find(p => p.uuid === senderUuid);
@@ -550,7 +550,7 @@ function setupBotEvents() {
           plainMsg = parseChatComponent(data.formattedMessage);
         }
 
-        log('info', `[PLAYER_CHAT PARSED]: username=${username} msg=${plainMsg}`);
+        log('info', `[PLAYER_CHAT PARSED]: user=${username} msg=${plainMsg}`);
         if (username && plainMsg && username !== bot.username) {
           emit({
             type: 'chat',
@@ -568,29 +568,57 @@ function setupBotEvents() {
     // 3. Handle system_chat (1.19+ system/server chat packet)
     bot._client.on('system_chat', (data) => {
       try {
+        const rawJson = typeof data.content === 'string' ? JSON.parse(data.content) : data.content;
         const plainText = parseChatComponent(data.content);
-        log('info', `[SYSTEM_CHAT PARSED]: ${plainText}`);
+        log('info', `[SYSTEM_CHAT PARSED]: raw=${JSON.stringify(rawJson)} text=${plainText}`);
         
-        // Match player chat patterns
-        const match = plainText.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
-                      plainText.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/) ||
-                      plainText.match(/^([a-zA-Z0-9_]{2,16})\s+whispers(?:\s+to\s+you)?:\s+(.+)$/i) ||
-                      plainText.match(/^([a-zA-Z0-9_]{2,16})\s+->\s+you:\s+(.+)$/i);
+        let username = null;
+        let message = null;
+        let isWhisper = false;
 
-        if (match) {
-          const username = match[1];
-          const message = match[2];
-          const isWhisper = /whisper|->/i.test(plainText);
-          if (username !== bot.username) {
-            const player = bot.players[username];
-            emit({
-              type: 'chat',
-              player: username,
-              uuid: player ? player.uuid : username,
-              message: message,
-              whisper: isWhisper,
-            });
+        // Check if the chat component has translation keys (e.g., chat.type.text translates [sender, message])
+        if (rawJson && rawJson.translate && rawJson.with && Array.isArray(rawJson.with)) {
+          const translateKey = rawJson.translate;
+          if (translateKey.includes('chat.type.text') || translateKey.includes('chat.type.announcement') || translateKey.includes('chat.type.team')) {
+            // Usually rawJson.with[0] is the sender component, rawJson.with[1] is the message component
+            const senderComp = rawJson.with[0];
+            const msgComp = rawJson.with[1];
+            username = parseChatComponent(senderComp).trim();
+            message = parseChatComponent(msgComp).trim();
+          } else if (translateKey.includes('commands.message.display.incoming')) {
+            // Whisper incoming
+            const senderComp = rawJson.with[0];
+            const msgComp = rawJson.with[1];
+            username = parseChatComponent(senderComp).trim();
+            message = parseChatComponent(msgComp).trim();
+            isWhisper = true;
           }
+        }
+
+        // Fallback to regex on plain text if translation didn't catch it
+        if (!username || !message) {
+          const match = plainText.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
+                        plainText.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/) ||
+                        plainText.match(/^([a-zA-Z0-9_]{2,16})\s+whispers(?:\s+to\s+you)?:\s+(.+)$/i) ||
+                        plainText.match(/^([a-zA-Z0-9_]{2,16})\s+->\s+you:\s+(.+)$/i);
+
+          if (match) {
+            username = match[1];
+            message = match[2];
+            isWhisper = /whisper|->/i.test(plainText);
+          }
+        }
+
+        if (username && message && username !== bot.username) {
+          log('info', `[CHAT EXTRACTED SUCCESS]: user=${username} msg=${message} whisper=${isWhisper}`);
+          const player = bot.players[username];
+          emit({
+            type: 'chat',
+            player: username,
+            uuid: player ? player.uuid : username,
+            message: message,
+            whisper: isWhisper,
+          });
         }
       } catch (e) {
         log('error', `Error parsing system_chat packet: ${e.message}`);
