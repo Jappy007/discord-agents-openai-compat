@@ -525,11 +525,20 @@ function setupBotEvents() {
       log('info', `[PLAYER_CHAT PACKET RECEIVED]: ${JSON.stringify(data)}`);
       
       try {
-        let username = data.senderName; // Sometimes populated directly
-        let plainMsg = data.plainMessage || '';
+        let username = data.senderName; 
         
-        // If not populated, try extraction from components
-        if (!plainMsg && data.unsignedChatContent) plainMsg = parseChatComponent(JSON.parse(data.unsignedChatContent));
+        // Try parsing the unsignedChatContent if present
+        let plainMsg = data.plainMessage || '';
+        if (!plainMsg && data.unsignedChatContent) {
+            try {
+                plainMsg = extractChatStrings(JSON.parse(data.unsignedChatContent)).join(' ');
+            } catch(e) { plainMsg = data.unsignedChatContent; }
+        }
+        
+        // Fallback: try extraction from components if plainMessage/unsignedContent fails
+        if (!plainMsg && data.formattedMessage) {
+             plainMsg = extractChatStrings(JSON.parse(data.formattedMessage)).join(' ');
+        }
         
         log('info', `[PLAYER_CHAT PARSED]: user=${username} msg=${plainMsg}`);
         
