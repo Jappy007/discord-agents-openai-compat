@@ -448,9 +448,9 @@ function setupBotEvents() {
   });
 
   if (bot._client) {
-    // Log EVERY incoming packet by name so we can see what chat packet Folia is sending
+    // Log ALL incoming packets to find the chat packet name
     bot._client.on('packet', (data, packetMeta) => {
-      // Log chat/message/disguised/command/system packets
+      log('info', `[ALL PACKET] ${packetMeta.name}`);
       if (
         packetMeta.name.includes('chat') ||
         packetMeta.name.includes('message') ||
@@ -521,26 +521,23 @@ function setupBotEvents() {
 
     // 2. Handle player_chat (1.19+ signed chat packet)
     bot._client.on('player_chat', (data) => {
-      log('info', `[PLAYER_CHAT RAW]: ${JSON.stringify(data)}`);
+      // Log exactly what's inside a player_chat packet
+      log('info', `[PLAYER_CHAT PACKET RECEIVED]: ${JSON.stringify(data)}`);
+      
       try {
-        const senderUuid = data.sender;
-        const playerObj = bot.players[senderUuid] || Object.values(bot.players).find(p => p.uuid === senderUuid);
-        let username = playerObj ? playerObj.username : (data.senderName || senderUuid);
-        
+        let username = data.senderName; // Sometimes populated directly
         let plainMsg = data.plainMessage || '';
-        if (!plainMsg && data.unsignedChatContent) {
-          plainMsg = extractChatStrings(JSON.parse(data.unsignedChatContent)).join(' ');
-        }
-        if (!plainMsg && data.formattedMessage) {
-          plainMsg = extractChatStrings(JSON.parse(data.formattedMessage)).join(' ');
-        }
-
+        
+        // If not populated, try extraction from components
+        if (!plainMsg && data.unsignedChatContent) plainMsg = parseChatComponent(JSON.parse(data.unsignedChatContent));
+        
         log('info', `[PLAYER_CHAT PARSED]: user=${username} msg=${plainMsg}`);
+        
         if (username && plainMsg && username !== bot.username) {
           emit({
             type: 'chat',
             player: username,
-            uuid: senderUuid,
+            uuid: data.sender || username,
             message: plainMsg,
             whisper: false,
           });
