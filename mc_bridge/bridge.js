@@ -447,6 +447,90 @@ function setupBotEvents() {
     if (!shuttingDown) scheduleReconnect();
   });
 
+  // Log all raw packet types related to chat/messages for debugging modern chat & secure chat packets
+  if (bot._client) {
+    bot._client.on('packet', (data, packetMeta) => {
+      if (packetMeta.name.includes('chat') || packetMeta.name.includes('message')) {
+        log('info', `[PACKET ${packetMeta.name}]: ${JSON.stringify(data)}`);
+      }
+    });
+
+    // Handle 1.19+ / 1.20+ / 1.21+ player_chat / system_chat packets directly
+    bot._client.on('player_chat', (data) => {
+      log('info', `[DIRECT player_chat packet]: ${JSON.stringify(data)}`);
+      try {
+        const senderUuid = data.sender;
+        const player = bot.players[senderUuid] || Object.values(bot.players).find(p => p.uuid === senderUuid);
+        const username = player ? player.username : (data.senderName || senderUuid);
+        const plainMsg = data.plainMessage || (data.unsignedChatContent ? JSON.parse(data.unsignedChatContent).text : null) || data.formattedMessage || "";
+        
+        if (username && plainMsg && username !== bot.username) {
+          emit({
+            type: 'chat',
+            player: username,
+            uuid: senderUuid,
+            message: plainMsg,
+            whisper: false,
+          });
+        }
+      } catch (e) {
+        log('error', `Error parsing player_chat packet: ${e.message}`);
+      }
+    });
+
+    bot._client.on('system_chat', (data) => {
+      log('info', `[DIRECT system_chat packet]: ${JSON.stringify(data)}`);
+      try {
+        let content = data.content;
+        if (typeof content === 'string') {
+          try { content = JSON.parse(content); } catch (_) {}
+        }
+        
+        // Extract plain text from Minecraft Chat Components
+        const extractText = (obj) => {
+          if (!obj) return "";
+          if (typeof obj === 'string') return obj;
+          let res = obj.text || "";
+          if (Array.isArray(obj.extra)) {
+            res += obj.extra.map(extractText).join("");
+          }
+          if (Array.isArray(obj.with)) {
+            res += obj.with.map(extractText).join(" ");
+          }
+          return res;
+        };
+
+        const plainText = extractText(content);
+        if (plainText) {
+          log('info', `[EXTRACTED system_chat text]: ${plainText}`);
+          // Match standard chat templates
+          const match = plainText.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
+                        plainText.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/) ||
+                        plainText.match(/^([a-zA-Z0-9_]{2,16})\s+whispers(?:\s+to\s+you)?:\s+(.+)$/i) ||
+                        plainText.match(/^([a-zA-Z0-9_]{2,16})\s+->\s+you:\s+(.+)$/i);
+
+          if (match) {
+            const username = match[1];
+            const message = match[2];
+            const isWhisper = /whisper|->/i.test(plainText);
+            if (username !== bot.username) {
+              const player = bot.players[username];
+              emit({
+                type: 'chat',
+                player: username,
+                uuid: player ? player.uuid : username,
+                message: message,
+                whisper: isWhisper,
+              });
+            }
+          }
+        }
+      } catch (e) {
+        log('error', `Error parsing system_chat packet: ${e.message}`);
+      }
+    });
+  }
+
   // In modern versions (1.19+ and especially ViaVersion), chat events often fire as 'message' (system/chat packets)
   // or 'messagestr' instead of the legacy 'chat' event. Let's capture all of them!
   bot.on('messagestr', (msg, position, jsonMsg) => {
