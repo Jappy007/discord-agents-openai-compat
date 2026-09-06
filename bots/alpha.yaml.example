@@ -28,7 +28,7 @@ discord:
   status: "Helpful AI assistant"
 
   # Default server timezone (IANA format)
-  timezone: "UTC"
+  timezone: "Europe/Copenhagen"
 
   # Allow bot to respond to other bots
   allow_bot_interactions: false

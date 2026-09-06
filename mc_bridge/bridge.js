@@ -478,9 +478,9 @@ function setupBotEvents() {
       log('info', 'minecraft client connected to server socket');
     });
 
-    // Log EVERY incoming packet by name so we can see what's actually arriving
+    // Log interesting incoming packets (chunks, entity movement, keep-alives
+    // and other high-frequency noise are filtered out)
     bot._client.on('packet', (data, packetMeta) => {
-      // Ignore high-frequency noise packets (chunks, entity movement, time, light, registries)
       const name = packetMeta.name;
       if (
         name.includes('entity') ||
@@ -496,11 +496,29 @@ function setupBotEvents() {
         name.includes('rel_move') ||
         name.includes('registry') ||
         name.includes('tags') ||
-        name.includes('recipe')
+        name.includes('recipe') ||
+        name.includes('keep_alive') ||
+        name.includes('bundle_delimiter') ||
+        name.includes('ping') ||
+        name.includes('pong') ||
+        name.includes('position') ||
+        name.includes('update') ||
+        name.includes('effect') ||
+        name.includes('animation') ||
+        name.includes('metadata') ||
+        name.includes('velocity') ||
+        name.includes('abilities') ||
+        name.includes('held') ||
+        name.includes('experience') ||
+        name.includes('health') ||
+        name.includes('score') ||
+        name.includes('tab') ||
+        name.includes('commands') ||
+        name.includes('custom')
       ) {
         return;
       }
-      log('info', `[PKT: ${name}]: ${JSON.stringify(data)}`);
+      log('debug', `[PKT: ${name}]: ${JSON.stringify(data)}`);
     });
 
     // Helper to recursively pull ONLY chat text out of prismarine NBT compound/list objects
@@ -540,6 +558,8 @@ function setupBotEvents() {
         const senderName = data.senderName || '';
         log('info', `[DISGUISED CHAT PARSED]: sender=${senderName} msg=${plainMsg}`);
         
+        if (plainMsg.includes('Received expired chat')) return; // Ignore server warnings
+
         const match = plainMsg.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) ||
                       plainMsg.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/);
         
@@ -583,6 +603,8 @@ function setupBotEvents() {
         
         log('info', `[PLAYER_CHAT PARSED]: user=${username} msg=${plainMsg}`);
         
+        if (plainMsg.includes('Received expired chat')) return; // Ignore server warnings
+        
         if (username && plainMsg && username !== bot.username) {
           emit({
             type: 'chat',
@@ -612,6 +634,7 @@ function setupBotEvents() {
           log('info', `[SYSTEM_CHAT SKIPPED]: system message (translate=${translationKey})`);
           return;
         }
+        if (fullText.includes('Received expired chat')) return; // Ignore server warnings
 
         // Try to extract player name and message from the flattened strings
         if (strings.length >= 2) {
@@ -658,6 +681,7 @@ function setupBotEvents() {
   bot.on('messagestr', (msg, position, jsonMsg) => {
     log('info', `[RAW MESSAGE] (pos=${position}): ${msg}`);
     if (position === 'game_info') return; // ignore actionbar
+    if (msg.includes('Received expired chat')) return; // Ignore server warnings
     
     // Parse typical chat formats: "<Player> Message" or "Player: Message" or "[Player] Message"
     const match = msg.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 

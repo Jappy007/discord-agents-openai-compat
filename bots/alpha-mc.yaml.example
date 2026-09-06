@@ -9,6 +9,9 @@ mode: "minecraft"  # Selects MinecraftClient instead of DiscordClient
 # ============================================================
 # MINECRAFT CONNECTION
 # ============================================================
+discord:
+  timezone: "Europe/Copenhagen"
+
 minecraft:
   host: "localhost"
   port: 25565

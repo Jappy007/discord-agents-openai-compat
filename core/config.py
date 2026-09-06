@@ -200,7 +200,7 @@ class DiscordConfig:
     """Discord-specific configuration"""
     token_env_var: str = "DISCORD_BOT_TOKEN"  # Environment variable containing bot token
     servers: List[str] = field(default_factory=list)  # Guild IDs
-    timezone: str = "UTC"  # Default server timezone (IANA format)
+    timezone: str = "Europe/Copenhagen"  # Default server timezone (IANA format)
     status: str = "Powered by Claude"  # Bot activity status
     allow_bot_interactions: bool = False  # Allow responding to other bots
     backfill_enabled: bool = True
