@@ -12,7 +12,7 @@ mode: "minecraft"  # Selects MinecraftClient instead of DiscordClient
 minecraft:
   host: "localhost"
   port: 25565
-  version: "1.26.2"
+  version: "1.21.4"
   username: "botaccount@example.com"  # Microsoft account email, or username for offline
   auth: "microsoft"                    # microsoft | offline
   bot_name: "ClaudeBot"                # In-game username

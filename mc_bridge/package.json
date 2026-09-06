@@ -8,7 +8,8 @@
     "auth": "node bridge.js --auth-only"
   },
   "dependencies": {
-    "mineflayer": "^4.20.1",
+    "minecraft-data": "^3.116.0",
+    "mineflayer": "^4.38.0",
     "mineflayer-pathfinder": "^2.4.5"
   }
 }

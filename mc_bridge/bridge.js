@@ -420,7 +420,8 @@ function setupBotEvents() {
   bot.on('login', () => {
     connected = true;
     log('info', `logged in as ${bot.username}`);
-    emit({ type: 'login', username: bot.username, uuid: bot.player.uuid });
+    const uuid = bot.player ? bot.player.uuid : "00000000-0000-0000-0000-000000000000";
+    emit({ type: 'login', username: bot.username, uuid: uuid });
     if (bot._client.session) saveAuthCache(bot._client.session);
   });
 
