@@ -462,58 +462,43 @@ function setupBotEvents() {
       }
     });
 
-    // Helper to recursively parse NBT/Compound and JSON chat components
-    function parseChatComponent(obj) {
-      if (!obj) return '';
-      if (typeof obj === 'string') return obj;
-      if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
-      
-      // Prismarine / NBT format: { type: 'compound', value: { text: { type: 'string', value: 'hello' } } }
-      if (obj.type === 'compound' && obj.value) {
-        return parseChatComponent(obj.value);
+    // Helper to recursively pull ONLY chat text out of prismarine NBT compound/list objects
+    // Filters out color codes, hover events, click events, and other metadata
+    function extractChatStrings(obj) {
+      if (!obj) return [];
+      if (typeof obj === 'string') {
+        // Skip known color codes and metadata values
+        if (/^(yellow|white|black|dark_blue|dark_green|dark_aqua|dark_red|dark_purple|gold|gray|dark_gray|blue|green|aqua|red|light_purple|show_entity|suggest_command|intArray|minecraft:player|QUOTABLE_PHRASE|SINGLE_WORD|GREEDY_PHRASE)$/.test(obj)) {
+          return [];
+        }
+        return [obj];
       }
+      if (Array.isArray(obj)) return obj.flatMap(extractChatStrings);
       if (obj.type === 'string' && typeof obj.value === 'string') {
-        return obj.value;
+        return extractChatStrings(obj.value);
       }
-      if (obj.type === 'list' && obj.value) {
-        if (Array.isArray(obj.value.value)) {
-          return obj.value.value.map(parseChatComponent).join('');
+      if (obj.type === 'compound' && obj.value) return extractChatStrings(obj.value);
+      if (obj.type === 'list' && obj.value) return extractChatStrings(obj.value);
+      if (typeof obj === 'object') {
+        let result = [];
+        for (const k of Object.keys(obj)) {
+          // Skip metadata fields that aren't actual chat text
+          if (['color', 'hoverEvent', 'clickEvent', 'insertion', 'type', 'value', 'style'].includes(k)) continue;
+          result = result.concat(extractChatStrings(obj[k]));
         }
-        if (Array.isArray(obj.value)) {
-          return obj.value.map(parseChatComponent).join('');
-        }
+        return result;
       }
-
-      let res = '';
-      if (obj.text) {
-        res += (typeof obj.text === 'object' ? parseChatComponent(obj.text) : obj.text);
-      }
-      if (obj.extra) {
-        if (Array.isArray(obj.extra)) {
-          res += obj.extra.map(parseChatComponent).join('');
-        } else if (typeof obj.extra === 'object') {
-          res += parseChatComponent(obj.extra);
-        }
-      }
-      if (obj.with) {
-        if (Array.isArray(obj.with)) {
-          res += obj.with.map(parseChatComponent).join(' ');
-        } else if (typeof obj.with === 'object') {
-          res += parseChatComponent(obj.with);
-        }
-      }
-      return res;
+      return [];
     }
 
     // 1. Handle disguised_chat (used by Folia/Paper and proxies when enforce-secure-profile is off/modified)
     bot._client.on('disguised_chat', (data) => {
       log('info', `[DISGUISED CHAT]: ${JSON.stringify(data)}`);
       try {
-        const plainMsg = parseChatComponent(data.message);
-        const senderName = data.chatType ? parseChatComponent(data.chatType) : (data.senderName || '');
+        const plainMsg = extractChatStrings(data.message).join(' ');
+        const senderName = data.senderName || '';
         log('info', `[DISGUISED CHAT PARSED]: sender=${senderName} msg=${plainMsg}`);
         
-        // Also try matching standard formats on the message text
         const match = plainMsg.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) ||
                       plainMsg.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/);
         
@@ -544,10 +529,10 @@ function setupBotEvents() {
         
         let plainMsg = data.plainMessage || '';
         if (!plainMsg && data.unsignedChatContent) {
-          plainMsg = parseChatComponent(data.unsignedChatContent);
+          plainMsg = extractChatStrings(JSON.parse(data.unsignedChatContent)).join(' ');
         }
         if (!plainMsg && data.formattedMessage) {
-          plainMsg = parseChatComponent(data.formattedMessage);
+          plainMsg = extractChatStrings(JSON.parse(data.formattedMessage)).join(' ');
         }
 
         log('info', `[PLAYER_CHAT PARSED]: user=${username} msg=${plainMsg}`);
@@ -569,30 +554,19 @@ function setupBotEvents() {
     bot._client.on('system_chat', (data) => {
       try {
         const raw = data.content;
-        
-        // Helper to recursively pull all strings and text out of prismarine NBT compound/list objects
-        const extractStrings = (v) => {
-          if (!v) return [];
-          if (typeof v === 'string') return [v];
-          if (Array.isArray(v)) return v.flatMap(extractStrings);
-          if (v.type === 'string' && typeof v.value === 'string') return [v.value];
-          if (v.type === 'compound' && v.value) return extractStrings(v.value);
-          if (v.type === 'list' && v.value) return extractStrings(v.value);
-          if (typeof v === 'object') {
-            return Object.values(v).flatMap(extractStrings);
-          }
-          return [];
-        };
-
-        const strings = extractStrings(raw);
+        const strings = extractChatStrings(raw);
         const fullText = strings.join(' ');
         log('info', `[SYSTEM_CHAT FLATTENED]: ${fullText}`);
 
-        // If we see typical chat strings (e.g. sender and message components)
-        // Folia components usually have strings like [SenderName, MessageContent]
+        // Filter out system messages (join/leave, etc.) - these have translate keys
+        // and don't represent actual player chat
+        if (raw && raw.translate && /multiplayer\.player\.(joined|left)|commands\.|chat\.type/.test(raw.translate)) {
+          log('info', `[SYSTEM_CHAT SKIPPED]: system message (translate=${raw.translate})`);
+          return;
+        }
+
+        // Try to extract player name and message from the flattened strings
         if (strings.length >= 2) {
-          // The last or second to last items usually make up the user and message
-          // Let's test standard patterns against the full joined string or look for user names
           for (let i = 0; i < strings.length - 1; i++) {
             const candidateUser = strings[i];
             const candidateMsg = strings[i+1];
