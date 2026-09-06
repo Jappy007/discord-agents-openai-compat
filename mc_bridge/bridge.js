@@ -82,6 +82,13 @@ function log(level, msg) {
   console.error(line); // logs on stderr so stdout stays pure JSON lines
 }
 
+function getTranslateKey(obj) {
+  if (obj && obj.type === 'compound' && obj.value && obj.value.translate) {
+    return obj.value.translate.value;
+  }
+  return null;
+}
+
 function emit(event) {
   console.log(JSON.stringify(event));
 }
@@ -593,7 +600,7 @@ function setupBotEvents() {
 
         // Filter out system messages (join/leave, etc.) - these have translate keys
         // and don't represent actual player chat
-        const translationKey = getTranslateKey(raw);
+        const translationKey = raw.translate || '';
         if (translationKey && /multiplayer\.player\.(joined|left)|commands\./.test(translationKey)) {
           log('info', `[SYSTEM_CHAT SKIPPED]: system message (translate=${translationKey})`);
           return;
