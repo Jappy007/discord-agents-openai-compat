@@ -447,23 +447,110 @@ function setupBotEvents() {
     if (!shuttingDown) scheduleReconnect();
   });
 
-  // Log all raw packet types related to chat/messages for debugging modern chat & secure chat packets
   if (bot._client) {
+    // Log EVERY incoming packet by name so we can see what chat packet Folia is sending
     bot._client.on('packet', (data, packetMeta) => {
-      if (packetMeta.name.includes('chat') || packetMeta.name.includes('message')) {
+      // Log chat/message/disguised/command/system packets
+      if (
+        packetMeta.name.includes('chat') ||
+        packetMeta.name.includes('message') ||
+        packetMeta.name.includes('disguised') ||
+        packetMeta.name.includes('command') ||
+        packetMeta.name.includes('profile')
+      ) {
         log('info', `[PACKET ${packetMeta.name}]: ${JSON.stringify(data)}`);
       }
     });
 
-    // Handle 1.19+ / 1.20+ / 1.21+ player_chat / system_chat packets directly
+    // Helper to recursively parse NBT/Compound and JSON chat components
+    function parseChatComponent(obj) {
+      if (!obj) return '';
+      if (typeof obj === 'string') return obj;
+      if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
+      
+      // Prismarine / NBT format: { type: 'compound', value: { text: { type: 'string', value: 'hello' } } }
+      if (obj.type === 'compound' && obj.value) {
+        return parseChatComponent(obj.value);
+      }
+      if (obj.type === 'string' && typeof obj.value === 'string') {
+        return obj.value;
+      }
+      if (obj.type === 'list' && obj.value) {
+        if (Array.isArray(obj.value.value)) {
+          return obj.value.value.map(parseChatComponent).join('');
+        }
+        if (Array.isArray(obj.value)) {
+          return obj.value.map(parseChatComponent).join('');
+        }
+      }
+
+      let res = '';
+      if (obj.text) {
+        res += (typeof obj.text === 'object' ? parseChatComponent(obj.text) : obj.text);
+      }
+      if (obj.extra) {
+        if (Array.isArray(obj.extra)) {
+          res += obj.extra.map(parseChatComponent).join('');
+        } else if (typeof obj.extra === 'object') {
+          res += parseChatComponent(obj.extra);
+        }
+      }
+      if (obj.with) {
+        if (Array.isArray(obj.with)) {
+          res += obj.with.map(parseChatComponent).join(' ');
+        } else if (typeof obj.with === 'object') {
+          res += parseChatComponent(obj.with);
+        }
+      }
+      return res;
+    }
+
+    // 1. Handle disguised_chat (used by Folia/Paper and proxies when enforce-secure-profile is off/modified)
+    bot._client.on('disguised_chat', (data) => {
+      log('info', `[DISGUISED CHAT]: ${JSON.stringify(data)}`);
+      try {
+        const plainMsg = parseChatComponent(data.message);
+        const senderName = data.chatType ? parseChatComponent(data.chatType) : (data.senderName || '');
+        log('info', `[DISGUISED CHAT PARSED]: sender=${senderName} msg=${plainMsg}`);
+        
+        // Also try matching standard formats on the message text
+        const match = plainMsg.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) ||
+                      plainMsg.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/);
+        
+        const player = match ? match[1] : (senderName || 'player');
+        const text = match ? match[2] : plainMsg;
+        
+        if (text && player !== bot.username) {
+          emit({
+            type: 'chat',
+            player: player,
+            uuid: data.sender || player,
+            message: text,
+            whisper: false,
+          });
+        }
+      } catch (e) {
+        log('error', `Error parsing disguised_chat: ${e.message}`);
+      }
+    });
+
+    // 2. Handle player_chat (1.19+ signed chat packet)
     bot._client.on('player_chat', (data) => {
-      log('info', `[DIRECT player_chat packet]: ${JSON.stringify(data)}`);
+      log('info', `[PLAYER_CHAT]: ${JSON.stringify(data)}`);
       try {
         const senderUuid = data.sender;
-        const player = bot.players[senderUuid] || Object.values(bot.players).find(p => p.uuid === senderUuid);
-        const username = player ? player.username : (data.senderName || senderUuid);
-        const plainMsg = data.plainMessage || (data.unsignedChatContent ? JSON.parse(data.unsignedChatContent).text : null) || data.formattedMessage || "";
+        const playerObj = bot.players[senderUuid] || Object.values(bot.players).find(p => p.uuid === senderUuid);
+        let username = playerObj ? playerObj.username : (data.senderName || senderUuid);
         
+        let plainMsg = data.plainMessage || '';
+        if (!plainMsg && data.unsignedChatContent) {
+          plainMsg = parseChatComponent(data.unsignedChatContent);
+        }
+        if (!plainMsg && data.formattedMessage) {
+          plainMsg = parseChatComponent(data.formattedMessage);
+        }
+
+        log('info', `[PLAYER_CHAT PARSED]: username=${username} msg=${plainMsg}`);
         if (username && plainMsg && username !== bot.username) {
           emit({
             type: 'chat',
@@ -478,51 +565,31 @@ function setupBotEvents() {
       }
     });
 
+    // 3. Handle system_chat (1.19+ system/server chat packet)
     bot._client.on('system_chat', (data) => {
-      log('info', `[DIRECT system_chat packet]: ${JSON.stringify(data)}`);
       try {
-        let content = data.content;
-        if (typeof content === 'string') {
-          try { content = JSON.parse(content); } catch (_) {}
-        }
+        const plainText = parseChatComponent(data.content);
+        log('info', `[SYSTEM_CHAT PARSED]: ${plainText}`);
         
-        // Extract plain text from Minecraft Chat Components
-        const extractText = (obj) => {
-          if (!obj) return "";
-          if (typeof obj === 'string') return obj;
-          let res = obj.text || "";
-          if (Array.isArray(obj.extra)) {
-            res += obj.extra.map(extractText).join("");
-          }
-          if (Array.isArray(obj.with)) {
-            res += obj.with.map(extractText).join(" ");
-          }
-          return res;
-        };
+        // Match player chat patterns
+        const match = plainText.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
+                      plainText.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/) ||
+                      plainText.match(/^([a-zA-Z0-9_]{2,16})\s+whispers(?:\s+to\s+you)?:\s+(.+)$/i) ||
+                      plainText.match(/^([a-zA-Z0-9_]{2,16})\s+->\s+you:\s+(.+)$/i);
 
-        const plainText = extractText(content);
-        if (plainText) {
-          log('info', `[EXTRACTED system_chat text]: ${plainText}`);
-          // Match standard chat templates
-          const match = plainText.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
-                        plainText.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/) ||
-                        plainText.match(/^([a-zA-Z0-9_]{2,16})\s+whispers(?:\s+to\s+you)?:\s+(.+)$/i) ||
-                        plainText.match(/^([a-zA-Z0-9_]{2,16})\s+->\s+you:\s+(.+)$/i);
-
-          if (match) {
-            const username = match[1];
-            const message = match[2];
-            const isWhisper = /whisper|->/i.test(plainText);
-            if (username !== bot.username) {
-              const player = bot.players[username];
-              emit({
-                type: 'chat',
-                player: username,
-                uuid: player ? player.uuid : username,
-                message: message,
-                whisper: isWhisper,
-              });
-            }
+        if (match) {
+          const username = match[1];
+          const message = match[2];
+          const isWhisper = /whisper|->/i.test(plainText);
+          if (username !== bot.username) {
+            const player = bot.players[username];
+            emit({
+              type: 'chat',
+              player: username,
+              uuid: player ? player.uuid : username,
+              message: message,
+              whisper: isWhisper,
+            });
           }
         }
       } catch (e) {
