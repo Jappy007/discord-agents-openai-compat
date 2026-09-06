@@ -568,60 +568,65 @@ function setupBotEvents() {
     // 3. Handle system_chat (1.19+ system/server chat packet)
     bot._client.on('system_chat', (data) => {
       try {
-        const rawJson = typeof data.content === 'string' ? JSON.parse(data.content) : data.content;
-        const plainText = parseChatComponent(data.content);
-        log('info', `[SYSTEM_CHAT PARSED]: raw=${JSON.stringify(rawJson)} text=${plainText}`);
+        const raw = data.content;
         
-        let username = null;
-        let message = null;
-        let isWhisper = false;
+        // Helper to recursively pull all strings and text out of prismarine NBT compound/list objects
+        const extractStrings = (v) => {
+          if (!v) return [];
+          if (typeof v === 'string') return [v];
+          if (Array.isArray(v)) return v.flatMap(extractStrings);
+          if (v.type === 'string' && typeof v.value === 'string') return [v.value];
+          if (v.type === 'compound' && v.value) return extractStrings(v.value);
+          if (v.type === 'list' && v.value) return extractStrings(v.value);
+          if (typeof v === 'object') {
+            return Object.values(v).flatMap(extractStrings);
+          }
+          return [];
+        };
 
-        // Check if the chat component has translation keys (e.g., chat.type.text translates [sender, message])
-        if (rawJson && rawJson.translate && rawJson.with && Array.isArray(rawJson.with)) {
-          const translateKey = rawJson.translate;
-          if (translateKey.includes('chat.type.text') || translateKey.includes('chat.type.announcement') || translateKey.includes('chat.type.team')) {
-            // Usually rawJson.with[0] is the sender component, rawJson.with[1] is the message component
-            const senderComp = rawJson.with[0];
-            const msgComp = rawJson.with[1];
-            username = parseChatComponent(senderComp).trim();
-            message = parseChatComponent(msgComp).trim();
-          } else if (translateKey.includes('commands.message.display.incoming')) {
-            // Whisper incoming
-            const senderComp = rawJson.with[0];
-            const msgComp = rawJson.with[1];
-            username = parseChatComponent(senderComp).trim();
-            message = parseChatComponent(msgComp).trim();
-            isWhisper = true;
+        const strings = extractStrings(raw);
+        const fullText = strings.join(' ');
+        log('info', `[SYSTEM_CHAT FLATTENED]: ${fullText}`);
+
+        // If we see typical chat strings (e.g. sender and message components)
+        // Folia components usually have strings like [SenderName, MessageContent]
+        if (strings.length >= 2) {
+          // The last or second to last items usually make up the user and message
+          // Let's test standard patterns against the full joined string or look for user names
+          for (let i = 0; i < strings.length - 1; i++) {
+            const candidateUser = strings[i];
+            const candidateMsg = strings[i+1];
+            if (candidateUser && candidateUser.length >= 2 && candidateUser.length <= 16 && /^[a-zA-Z0-9_]+$/.test(candidateUser)) {
+              if (candidateUser !== bot.username && candidateMsg && candidateMsg !== candidateUser) {
+                log('info', `[CHAT RECOVERED FROM NBT]: user=${candidateUser} msg=${candidateMsg}`);
+                const player = bot.players[candidateUser];
+                emit({
+                  type: 'chat',
+                  player: candidateUser,
+                  uuid: player ? player.uuid : candidateUser,
+                  message: candidateMsg,
+                  whisper: false,
+                });
+                return;
+              }
+            }
           }
         }
 
-        // Fallback to regex on plain text if translation didn't catch it
-        if (!username || !message) {
-          const match = plainText.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
-                        plainText.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/) ||
-                        plainText.match(/^([a-zA-Z0-9_]{2,16})\s+whispers(?:\s+to\s+you)?:\s+(.+)$/i) ||
-                        plainText.match(/^([a-zA-Z0-9_]{2,16})\s+->\s+you:\s+(.+)$/i);
-
-          if (match) {
-            username = match[1];
-            message = match[2];
-            isWhisper = /whisper|->/i.test(plainText);
-          }
-        }
-
-        if (username && message && username !== bot.username) {
-          log('info', `[CHAT EXTRACTED SUCCESS]: user=${username} msg=${message} whisper=${isWhisper}`);
-          const player = bot.players[username];
+        // Fallback regex match
+        const match = fullText.match(/^[<\[]([a-zA-Z0-9_]{2,16})[>\]]\s+(.+)$/) || 
+                      fullText.match(/^([a-zA-Z0-9_]{2,16}):\s+(.+)$/);
+        if (match && match[1] !== bot.username) {
           emit({
             type: 'chat',
-            player: username,
-            uuid: player ? player.uuid : username,
-            message: message,
-            whisper: isWhisper,
+            player: match[1],
+            uuid: bot.players[match[1]]?.uuid || match[1],
+            message: match[2],
+            whisper: false,
           });
         }
       } catch (e) {
-        log('error', `Error parsing system_chat packet: ${e.message}`);
+        log('error', `Error parsing system_chat: ${e.message}`);
       }
     });
   }
