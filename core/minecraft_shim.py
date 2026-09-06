@@ -44,7 +44,11 @@ class MCGuild:
     """Fake Discord guild representing the Minecraft server."""
 
     def __init__(self, guild_id: str, name: str, me: MCUser):
-        self.id = int(guild_id)
+        # Allow non-numeric guild ids (e.g. "minecraft")
+        try:
+            self.id = int(guild_id)
+        except ValueError:
+            self.id = int(hash(guild_id) % 10**10)
         self.name = name
         self.me = me
         self.member_count = 0
@@ -65,7 +69,10 @@ class MCChannel:
 
     def __init__(self, channel_id: str, name: str, send_callback, guild: Optional[MCGuild] = None,
                  recipient: Optional[MCUser] = None):
-        self.id = int(channel_id)
+        try:
+            self.id = int(channel_id)
+        except ValueError:
+            self.id = int(hash(channel_id) % 10**10)
         self.channel_id = channel_id
         self.name = name
         self._send = send_callback
