@@ -137,9 +137,10 @@ class MinecraftClient:
 
         # Seed reactive engine list_servers / resolver with fake guild.
         self.reactive_engine.list_servers = lambda: [self.guild.name]
-        self.reactive_engine.repository_manager.guild_name_resolver = (
-            lambda gid: self.guild.name if gid == "minecraft" else None
-        )
+        if hasattr(self.reactive_engine, 'repository_manager') and self.reactive_engine.repository_manager:
+            self.reactive_engine.repository_manager.guild_name_resolver = (
+                lambda gid: self.guild.name if gid == "minecraft" else None
+            )
 
     async def close(self):
         """Graceful shutdown."""
