@@ -210,6 +210,8 @@ class MinecraftClient:
                 logger.debug(f"_read_loop: {etype} done")
             except json.JSONDecodeError:
                 logger.info(f"[bridge output] {text}")
+            except Exception as e:
+                logger.error(f"Error handling bridge event: {e}", exc_info=True)
 
 
     async def _handle_bridge_event(self, event):

@@ -19,7 +19,12 @@ class MCUser:
     """Fake Discord user/member backed by a Minecraft player."""
 
     def __init__(self, uuid: str, name: str, display_name: str = None, bot: bool = False):
-        self.id = int(uuid.replace("-", "")[:18]) or 1  # numeric-ish id
+        # Convert UUID to numeric ID using base 16 (hexadecimal)
+        try:
+            self.id = int(uuid.replace("-", "")[:18], 16) or 1
+        except ValueError:
+            # Fallback if conversion fails
+            self.id = hash(uuid) & 0xFFFFFFFFFFFFFFFF
         self.uuid = uuid
         self.name = name
         self.display_name = display_name or name
