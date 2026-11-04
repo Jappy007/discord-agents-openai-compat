@@ -27,7 +27,7 @@ function makeRepos() {
   git(origin, "init", "-q", "-b", "main");
   git(origin, "config", "user.email", "t@t.t");
   git(origin, "config", "user.name", "t");
-  commit(origin, "requirements.txt", "anthropic\n", "init");
+  commit(origin, "requirements.txt", "openai\n", "init");
   commit(origin, "core.py", "v1\n", "v1");
 
   const work = path.join(tmp, "work");
@@ -39,7 +39,7 @@ function makeRepos() {
 }
 
 function advanceOrigin(origin, { touchReqs = false } = {}) {
-  if (touchReqs) commit(origin, "requirements.txt", "anthropic\naiohttp\n", "bump deps");
+  if (touchReqs) commit(origin, "requirements.txt", "openai\naiohttp\n", "bump deps");
   else commit(origin, "core.py", "v2\n", "v2");
 }
 

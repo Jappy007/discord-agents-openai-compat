@@ -1,7 +1,7 @@
 """
 create_pptx tool - server-side PowerPoint generation (client-side, on-device).
 
-Why this exists: there is no code_execution container and no Files API - those
+Why this exists: there is no code_execution container - that
 are provider server features (see
 core/llm_providers/openai_compatible.py). The model therefore cannot generate
 a .pptx by writing python-pptx code in a sandbox. This tool gives it the same

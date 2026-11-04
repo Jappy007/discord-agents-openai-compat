@@ -83,7 +83,7 @@ function tokens(n) {
   return String(n);
 }
 
-const modelShort = (m) => (m || "").replace(/^claude-/, "");
+const modelShort = (m) => (m || "");
 
 // Live data has honest nulls (a bot that never spoke has no last_channel);
 // render them as nothing instead of crashing the tab.
