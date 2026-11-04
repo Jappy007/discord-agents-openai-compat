@@ -13,7 +13,7 @@ This module translates at the boundary:
   - OpenAI completion                     -> internal response object
 
 Only client-side function tools are supported; there are no server-side
-tools, Files API, Batches API, containers, thinking or prompt caching.
+tools, thinking or prompt caching.
 """
 import json
 import logging
