@@ -443,11 +443,12 @@ class DiscordClient(discord.Client):
             logger.info("Agentic loop started")
 
         # Backfill historical messages if enabled (always in background -
-        # blocking the gateway on startup is never right)
+        # blocking the gateway on startup is never right). The first pass
+        # fills the configured history window and is recorded per channel;
+        # later boots only fetch the gap since the last backfill.
         if self.config.discord.backfill_enabled:
             self._track_task(self.backfill_message_history(
                 days_back=self.config.discord.backfill_days,
-                incremental=True,  # boot resumes where the last session stopped
             ))
 
             # Initialize memory structure with skeleton files (v0.5.0)
@@ -460,9 +461,9 @@ class DiscordClient(discord.Client):
             except Exception as e:
                 logger.error(f"Failed to initialize memory structure: {e}", exc_info=True)
 
-            # Start daily re-backfill task to catch edited messages
-            self._track_task(self._daily_reindex_task())
-            logger.info("Daily re-backfill task started (will run at 3 AM UTC)")
+            # Daily housekeeping (no re-backfill - gaps are covered on boot)
+            self._track_task(self._daily_maintenance_task())
+            logger.info("Daily maintenance task started (will run at 3 AM UTC)")
 
         logger.info("Bot is ready!")
 
@@ -650,6 +651,7 @@ class DiscordClient(discord.Client):
                 try:
                     total = await self.backfill_message_history(
                         days_back=self.config.discord.backfill_days,
+                        force_full=True,
                         )
                     complete_msg = f"Reindex complete! Updated {total} messages.\n*Note: If you edited messages during reindex, run again to catch them.*"
                     await message.channel.send(complete_msg)
@@ -816,22 +818,31 @@ class DiscordClient(discord.Client):
         logger.info(f"Removed from server: {guild.name} (ID: {guild.id})")
 
     async def backfill_message_history(self, days_back: int = 30,
-                                       incremental: bool = False):
+                                       force_full: bool = False):
         """
         Fetch and index historical messages from accessible channels.
 
         Populates message database with historical messages to enable
         powerful search capabilities beyond current session.
 
+        Each channel's first successful pass is a full backfill of the
+        configured window; the completion is persisted so later boots only
+        fetch the gap since the last backfill (i.e. messages missed while the
+        bot was offline). Set `force_full` to ignore the marker (manual
+        reindex / edit sweep).
+
         Args:
-            days_back: Number of days of history to fetch; 0 = unlimited
-                       (all accessible history)
-            incremental: resume each channel from its newest stored message
-                         instead of re-fetching the whole window. Boot uses
-                         this; the daily re-backfill stays full because its
-                         job is catching edits to already-stored messages.
+            days_back: Number of days of history to fetch on a first pass;
+                       0 = unlimited (all accessible history)
+            force_full: run the full window for every channel, even ones
+                        already marked as initially backfilled
         """
         from datetime import datetime, timedelta, timezone
+
+        def _aware(dt):
+            if dt is not None and dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
 
         if days_back <= 0:
             logger.info("Starting UNLIMITED message history backfill (all accessible history)...")
@@ -840,11 +851,14 @@ class DiscordClient(discord.Client):
             logger.info(f"Starting message history backfill ({days_back} days)...")
             cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
-        resume = await self.message_memory.newest_message_times() if incremental else {}
+        backfill_state = await self.message_memory.get_backfill_state()
+        resume = await self.message_memory.newest_message_times()
 
         total_messages = 0
         total_channels = 0
         failed_channels = 0
+        initial_channels = 0
+        gap_channels = 0
 
         for guild in self.guilds:
             # Only backfill configured servers
@@ -856,20 +870,37 @@ class DiscordClient(discord.Client):
 
             async for channel in iter_backfill_channels(guild):
                 try:
+                    channel_id = str(channel.id)
                     channel_messages = 0
-                    logger.debug(f"  Backfilling #{channel.name}...")
+                    state = backfill_state.get(channel_id)
+                    is_initial = (
+                        force_full
+                        or not state
+                        or not state.get("initial_backfill_completed_at")
+                    )
+
+                    if is_initial:
+                        # First pass for this channel: full configured window.
+                        after = cutoff
+                        logger.debug(f"  Backfilling #{channel.name} (initial)...")
+                    else:
+                        # Later pass: only the gap since the last backfill.
+                        # `resume` (newest stored message) wins when newer;
+                        # `last_backfilled_at` covers channels with no stored
+                        # messages at all.
+                        after = _aware(resume.get(channel_id))
+                        last = _aware(state.get("last_backfilled_at"))
+                        if last and (after is None or last > after):
+                            after = last
+                        if after is None:
+                            after = cutoff
+                        logger.debug(f"  Backfilling #{channel.name} (gap)...")
 
                     # Threads met during backfill register their parent mapping
                     if isinstance(channel, discord.Thread):
                         await self.message_memory.upsert_thread(
                             str(channel.id), parent_id=str(channel.parent_id),
                             name=channel.name, archived=bool(channel.archived))
-
-                    # Resume point: newest stored message wins over the
-                    # window cutoff when it's more recent
-                    after = resume.get(str(channel.id)) or cutoff
-                    if after and cutoff and cutoff > after:
-                        after = cutoff
 
                     async for message in channel.history(limit=None, after=after):
                         try:
@@ -884,6 +915,16 @@ class DiscordClient(discord.Client):
                         except Exception as e:
                             logger.debug(f"  Skipped message {message.id}: {e}")
 
+                    # Only mark complete after the pass succeeds, so a
+                    # permission/network failure is retried next boot.
+                    await self.message_memory.mark_backfill_complete(
+                        channel_id, str(guild.id), initial=is_initial)
+
+                    if is_initial:
+                        initial_channels += 1
+                    else:
+                        gap_channels += 1
+
                     if channel_messages > 0:
                         logger.debug(f"  #{channel.name}: {channel_messages} messages")
                         total_channels += 1
@@ -896,6 +937,8 @@ class DiscordClient(discord.Client):
                     failed_channels += 1
 
         logger.info(f"Backfill complete: {total_messages} messages from {total_channels} channels")
+        logger.info(f"  {initial_channels} initial backfill(s), "
+                    f"{gap_channels} gap backfill(s)")
         if failed_channels > 0:
             logger.info(f"  ({failed_channels} channels skipped due to permissions/errors)")
 
@@ -1015,16 +1058,17 @@ class DiscordClient(discord.Client):
 
         return True
 
-    async def _daily_reindex_task(self):
+    async def _daily_maintenance_task(self):
         """
-        Background task that runs daily re-backfill to catch edited messages.
+        Background task for daily housekeeping.
 
-        Runs at 3 AM UTC each day to update the message database with any
-        edits that occurred during the previous day.
+        Historical messages are only backfilled on first boot and on restart
+        gap-fill, so this no longer re-fetches history (that caused a full
+        window sweep every day). It only prunes old conversation state.
         """
         from datetime import datetime, timedelta
 
-        logger.info("Daily reindex task initialized")
+        logger.info("Daily maintenance task initialized")
 
         while True:
             try:
@@ -1039,17 +1083,10 @@ class DiscordClient(discord.Client):
                     next_run += timedelta(days=1)
 
                 wait_seconds = (next_run - now).total_seconds()
-                logger.info(f"Next daily reindex scheduled for {next_run} UTC (in {wait_seconds/3600:.1f} hours)")
+                logger.info(f"Next daily maintenance scheduled for {next_run} UTC (in {wait_seconds/3600:.1f} hours)")
 
                 # Wait until 3 AM
                 await asyncio.sleep(wait_seconds)
-
-                # Run backfill
-                logger.info("Starting scheduled daily re-backfill...")
-                total = await self.backfill_message_history(
-                    days_back=self.config.discord.backfill_days,
-                )
-                logger.info(f"Daily re-backfill complete: {total} messages indexed")
 
                 # Garbage-collect conversation states for long-dead channels
                 if self.reactive_engine.conversation_state_manager:
@@ -1059,9 +1096,9 @@ class DiscordClient(discord.Client):
                         logger.error(f"Conversation-state cleanup failed: {e}")
 
             except asyncio.CancelledError:
-                logger.info("Daily reindex task cancelled")
+                logger.info("Daily maintenance task cancelled")
                 break
             except Exception as e:
-                logger.error(f"Error in daily reindex task: {e}", exc_info=True)
+                logger.error(f"Error in daily maintenance task: {e}", exc_info=True)
                 # Wait 1 hour before retrying on error
                 await asyncio.sleep(3600)

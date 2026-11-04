@@ -205,8 +205,9 @@ personality:
 python bot_manager.py spawn alpha
 ```
 
-The bot connects, backfills message history in the background, starts its
-autonomous loop, and responds to @mentions.
+The bot connects, backfills message history in the background on its first
+run (later runs only fetch the gap left by downtime), starts its autonomous
+loop, and responds to @mentions.
 
 ### 5. (Optional) Run the dashboard
 

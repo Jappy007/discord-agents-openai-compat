@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+**Status:** Pre-release (beta).
+
+### Changed
+- **Backfill runs once, then only fills offline gaps.** Each channel's first
+  successful backfill now records a persistent completion marker in the
+  message database. Subsequent boots fetch only messages newer than the last
+  stored message / last backfill, instead of sweeping the configured window
+  again. The daily 3 AM full re-backfill was removed; the manual `@bot reindex`
+  command still performs a full window sweep on demand.
+
+---
+
 ## [0.12.4] - 2026-07-05
 
 **Status:** Pre-release (beta). Default model bump only - no behavioral changes.

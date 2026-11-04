@@ -96,6 +96,13 @@ class MessageMemory:
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS backfill_state (
+        channel_id TEXT PRIMARY KEY,
+        guild_id TEXT,
+        initial_backfill_completed_at DATETIME,
+        last_backfilled_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS threads (
         thread_id TEXT PRIMARY KEY,
         parent_id TEXT NOT NULL,
@@ -793,6 +800,50 @@ class MessageMemory:
             except (TypeError, ValueError):
                 pass
         return out
+
+    async def get_backfill_state(self) -> Dict[str, dict]:
+        """channel_id -> backfill state row.
+
+        `initial_backfill_completed_at` records that the one-time historical
+        backfill for a channel has finished. Channels missing from this table
+        (or with it unset) still need their first, full backfill."""
+        cursor = await self._db.execute(
+            "SELECT channel_id, guild_id, initial_backfill_completed_at,"
+            " last_backfilled_at FROM backfill_state")
+        out = {}
+        for row in await cursor.fetchall():
+            state = dict(row)
+            for key in ("initial_backfill_completed_at", "last_backfilled_at"):
+                value = state.get(key)
+                if value:
+                    try:
+                        state[key] = datetime.fromisoformat(value)
+                    except (TypeError, ValueError):
+                        state[key] = None
+            out[state["channel_id"]] = state
+        return out
+
+    async def mark_backfill_complete(self, channel_id: str, guild_id: str,
+                                     initial: bool = False) -> None:
+        """Record that a channel's backfill pass succeeded.
+
+        Sets the one-time initial marker on the first successful pass and
+        refreshes `last_backfilled_at` every time, which is the resume point
+        for gap-only backfills after downtime."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """INSERT INTO backfill_state
+                 (channel_id, guild_id, initial_backfill_completed_at, last_backfilled_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(channel_id) DO UPDATE SET
+                 guild_id = excluded.guild_id,
+                 initial_backfill_completed_at = COALESCE(
+                   backfill_state.initial_backfill_completed_at,
+                   excluded.initial_backfill_completed_at),
+                 last_backfilled_at = excluded.last_backfilled_at""",
+            (str(channel_id), str(guild_id), now if initial else None, now),
+        )
+        await self._db.commit()
 
     async def get_latest_message(self, channel_id: str) -> Optional[StoredMessage]:
         """Get the most recent non-system message in a channel, or None."""
