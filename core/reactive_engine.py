@@ -168,7 +168,11 @@ class ReactiveEngine:
 
         # Initialize LLM client (OpenAI-compatible endpoint)
         from core.llm_providers.factory import build_llm_client
-        self.llm = build_llm_client()
+        self.llm = build_llm_client(
+            model=config.api.model,
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            base_url=os.getenv("OPENAI_BASE_URL", ""),
+        )
 
         # Cache internal config values (v0.6.0 - simplified config)
         self._rate_limiting_config = config.get_rate_limiting_config()

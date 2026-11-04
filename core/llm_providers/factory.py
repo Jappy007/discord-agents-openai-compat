@@ -16,7 +16,7 @@ import os
 from typing import Optional
 
 
-def build_llm_client(api_key: Optional[str] = None):
+def build_llm_client(model: str, api_key: str, base_url: str):
     """Build the client used for all model calls.
 
     `api_key` is accepted for backwards compatibility with older call sites;

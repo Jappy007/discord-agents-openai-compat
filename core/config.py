@@ -90,12 +90,19 @@ class AgenticConfig:
 
 
 @dataclass
+class WebSearchConfig:
+    """Web search configuration"""
+    enabled: bool = True
+
+
+@dataclass
 class APIConfig:
     """LLM API configuration"""
     model: str = ""  # falls back to OPENAI_MODEL when empty
     max_tokens: int = 4096
     context_messages: int = 30  # Messages to remember (rolling window)
     context_tokens: int = 80000  # Session token threshold: episodize + reseed past this (from response.usage)
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
 
 
 @dataclass
@@ -216,7 +223,7 @@ class BotConfig:
             FileNotFoundError: If config file doesn't exist
             ValueError: If config is invalid
         """
-        if not yaml_path.exists():
+        if not Path(yaml_path).exists():
             raise FileNotFoundError(f"Config file not found: {yaml_path}")
 
         with open(yaml_path, encoding="utf-8-sig") as f:
@@ -359,11 +366,17 @@ class BotConfig:
             context_management_data.get("max_total_tokens", 100000)
         )
 
+        web_search_data = api_data.get("web_search", {})
+        web_search = WebSearchConfig(
+            enabled=web_search_data.get("enabled", True),
+        )
+
         api = APIConfig(
             model=api_data.get("model", ""),
             max_tokens=api_data.get("max_tokens", 4096),
             context_messages=context_messages,
             context_tokens=context_tokens,
+            web_search=web_search,
         )
 
         # OPENAI_MODEL (.env) overrides the yaml model, so a single API
