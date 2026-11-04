@@ -26,7 +26,7 @@ cd C:\path\to\prod                     # clones onto main = latest release
 python -m venv .venv                   # own venv: dev dependency churn can't break prod
 .\.venv\Scripts\pip install -r requirements.txt
 
-# .env with this install's secrets (bot token + ANTHROPIC_API_KEY)
+# .env with this install's secrets (bot token + OpenAI-compatible API settings)
 # bots/<name>.yaml with this install's bot config
 .\.venv\Scripts\python.exe bot_manager.py spawn <name>
 ```

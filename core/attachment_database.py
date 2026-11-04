@@ -1,7 +1,7 @@
 """
 Attachment Database - Schema and migrations for attachment tracking system.
 
-Handles multi-source storage (Discord CDN, local files, Files API) with quota tracking.
+Handles local attachment storage and image caching.
 """
 
 import logging
@@ -46,7 +46,6 @@ class AttachmentDatabase:
                     -- Multi-source storage
                     discord_url TEXT,
                     local_path TEXT,
-                    file_id TEXT,
 
                     -- Image-specific cache
                     processed_base64 TEXT,
@@ -54,7 +53,6 @@ class AttachmentDatabase:
 
                     -- Timestamps
                     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    file_api_uploaded_at TIMESTAMP,
 
                     FOREIGN KEY (message_id) REFERENCES messages(message_id) ON DELETE CASCADE
                 )
@@ -72,25 +70,8 @@ class AttachmentDatabase:
             """)
 
             await self.db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_attachments_file_id
-                ON attachments(file_id)
-            """)
-
-            await self.db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_attachments_type
                 ON attachments(attachment_type)
-            """)
-
-            # Quota tracking view
-            await self.db.execute("""
-                CREATE VIEW IF NOT EXISTS files_api_usage AS
-                SELECT
-                    COUNT(*) as total_files,
-                    SUM(size_bytes) as bytes_used,
-                    107374182400 - COALESCE(SUM(size_bytes), 0) as bytes_remaining,
-                    (COALESCE(SUM(size_bytes), 0) * 100.0 / 107374182400) as percent_used
-                FROM attachments
-                WHERE file_id IS NOT NULL
             """)
 
             await self.db.commit()

@@ -1,5 +1,5 @@
 """
-Context Builder - Smart Assembly for Claude API
+Context Builder - Smart Assembly for model API
 
 Builds rich context from Discord messages with:
 - @mention resolution to display names
@@ -26,10 +26,9 @@ if TYPE_CHECKING:
     from .message_memory import MessageMemory
     from .memory_manager import MemoryManager
     from .unified_attachment_manager import UnifiedAttachmentManager
-    from .skills_manager import SkillsManager
 
 from tools.image_processor import ImageProcessor
-from tools.skills_tool import build_skills_catalog_prompt
+from .attachment_classifier import AttachmentClassifier
 from .internal_constants import (
     MANDATORY_RESPONSE_JUDGMENT_PROMPT,
     MANDATORY_DISCRETION_PROMPT,
@@ -61,7 +60,7 @@ def describe_channel(channel) -> str:
 
 class ContextBuilder:
     """
-    Assembles rich context for Claude API calls.
+    Assembles rich context for model API calls.
 
     Resolves @mentions, threads reply chains, integrates memory paths,
     and processes images into multimodal content blocks.
@@ -73,35 +72,15 @@ class ContextBuilder:
         message_memory: "MessageMemory",
         memory_manager: "MemoryManager",
         attachment_manager: Optional["UnifiedAttachmentManager"] = None,
-        skills_manager: Optional["SkillsManager"] = None
     ):
         self.config = config
         self.message_memory = message_memory
         self.memory_manager = memory_manager
         self.attachment_manager = attachment_manager
-        self.skills_manager = skills_manager
         self._mention_names: Dict[int, str] = {}  # id -> display name memo
         self.image_processor = ImageProcessor()
 
         logger.info(f"ContextBuilder initialized for bot '{config.bot_id}'")
-
-    def build_skills_prompt(self, active_skills: List[str]) -> str:
-        """
-        Build the skills catalog section for system prompt.
-
-        Enables progressive disclosure - Claude sees all available skills
-        and knows which ones are currently loaded.
-
-        Args:
-            active_skills: List of currently active skill names
-
-        Returns:
-            Formatted XML section for system prompt, or empty string if no skills_manager
-        """
-        if not self.skills_manager:
-            return ""
-
-        return build_skills_catalog_prompt(self.skills_manager, active_skills)
 
     @staticmethod
     def _trim_episode_index(state_content: str, keep_last: int = None) -> str:
@@ -121,7 +100,7 @@ class ContextBuilder:
 
     async def build_context(self, message: discord.Message, exclude_message_ids: List[int] = None) -> dict:
         """
-        Build context dict for Claude API call.
+        Build context dict for model API call.
 
         Returns dict with system_prompt, messages array, and stats.
         Optionally excludes specific message IDs (e.g., filtering in-flight messages).
@@ -241,7 +220,7 @@ conversation has been distilled into episode files.
 If a reference is unclear, do NOT guess:
 - Open the relevant episode file with the memory tool (paths in the episode index)
 - Search message history with discord tools (search_messages / view_messages)
-- Re-fetch attachments with get_attachment / code_execution if an analysis was cleared
+- Re-fetch attachments with get_attachment if an analysis was cleared
 
 Your message history and memory span the WHOLE server, not just this channel.
 When someone references something as if you should know it (an event, a project,
@@ -284,68 +263,26 @@ MEMORY USAGE: You have memory files for persistent information. Use them proacti
 - Places: channel notes, episodes, and culture stay under their server's directory.
 - Track ongoing projects, save context worth keeping, build understanding of channel culture.
 
-TOOL USAGE GUIDELINES (CRITICAL):
-When you have access to the code_execution tool:
-- For spreadsheets (xlsx, xlsm, csv, xls): ALWAYS use code_execution with pandas or openpyxl to read and analyze
-- For binary documents (docx, pptx): Use code_execution to read/extract text content, OR to create new files from scratch (python-docx and python-pptx are preinstalled in the sandbox)
-- For large files marked as 'container_upload': Use code_execution to access at the documented path
-- DO NOT rely on document preview/extraction for spreadsheets - it may be incomplete or miss formatting
-- When asked to calculate, analyze data, or process file contents: USE code_execution first
+TOOL USAGE GUIDELINES:
+- Images are provided inline as image content. Other files are saved locally and
+  listed in the attachments_index; retrieve metadata with get_attachment.
+- When asked to calculate or analyze data from a file, say plainly what you can
+  and cannot inspect from the content available to you.
 
-Example for spreadsheet:
-```python
-import os, pandas as pd
-df = pd.read_excel(os.path.join(os.environ.get('INPUT_DIR', '.'), 'filename.xlsx'))
-print(df.describe())
-```
+DELIVERING FILES: files are delivered from the local output store.
+create_pptx saves to it directly, and send_message's attach_outputs delivers
+any previously created file by name. Files left anywhere else are not
+attached. Never claim a file is attached unless it was created by a tool.
 
-DELIVERING FILES: files you place in $OUTPUT_DIR (the code-exec environment's
-output directory) are attached to your Discord reply. To deliver a document,
-finish with e.g.: cp /tmp/briefing.pptx "$OUTPUT_DIR"/briefing.pptx
-
-On this provider (without code execution), files are delivered from the
-local output store: create_pptx saves to it directly, and send_message's
-attach_outputs delivers any previously created file by name.
-
-Files left anywhere else are not attached. Never claim a file is attached
-unless you put it in $OUTPUT_DIR or it was created by a tool.
-
-CREATING PRESENTATIONS: on this provider without code execution,
-call create_pptx instead of python-pptx in code_execution. Provide a
-title and an ordered list of slides with titles and bullet points; the
-tool builds the .pptx locally and reports the saved filename. Pass
-that filename to send_message with attach_outputs to deliver it.
-
-On providers with code_execution, to build a PowerPoint (.pptx) from
-scratch, first call request_skill with skill_name "pptx" to load the
-built-in skill, then use code_execution with python-pptx to generate
-the file and copy it to $OUTPUT_DIR. Use send_message with attach_outputs
-to send it mid-turn rather than waiting for end-of-turn delivery.
-Example skeleton:
-
-  from pptx import Presentation
-  from pptx.util import Inches, Pt
-  prs = Presentation()
-  slide = prs.slides.add_slide(prs.slide_layouts[1])
-  slide.shapes.title.text = "My Title"
-  slide.placeholders[1].text = "Bullet point"
-  prs.save("/tmp/deck.pptx")
-  import os, shutil
-  shutil.copy("/tmp/deck.pptx", os.path.join(os.environ["OUTPUT_DIR"], "deck.pptx"))
-
-KNOW YOUR SANDBOX: the code-exec environment has no network access - pip
-install, curl, and apt will hang or fail, and there's no ffmpeg binary. What
-you have is the preinstalled scientific stack (pandas, numpy, matplotlib,
-pillow, scipy, sympy, openpyxl, python-docx, python-pptx, pypdf, and
-friends). Work within it; if a task truly needs something the sandbox lacks,
-say so plainly instead of fighting it.
+CREATING PRESENTATIONS: call create_pptx. Provide a title and an ordered list
+of slides with titles and bullet points; the tool builds the .pptx locally and
+reports the saved filename. Pass that filename to send_message with
+attach_outputs to deliver it.
 
 WORKING ON PROJECTS: for anything that spans turns - a document you're
-building, an analysis in progress, assets for something bigger - use the
-repository as your workbench. Save drafts and intermediates there
-(save_output / save_file), pick them up later with get_attachment, and keep
-a project's files together in a folder. Container files die with the turn;
-the repository is what persists.
+building, analysis notes, assets for something bigger - use the repository as
+your workbench. Save drafts and intermediates there (save_file), pick them up
+later with get_attachment, and keep a project's files together in a folder.
 
 The attachments_index section lists this channel's recent files with their IDs;
 retrieve anything marked 'not in context' with the discord get_attachment tool.
@@ -380,7 +317,7 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
         # Trim to configured limit after filtering
         recent_messages = recent_messages[:self.config.api.context_messages]
 
-        # Build messages array for Claude
+        # Build messages array for the model
         messages = []
 
         # Add recent message history as context
@@ -610,40 +547,26 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
         return resolved, resolved_count
 
     async def _get_attachment_data(self, message_id: str) -> List[Dict]:
-        """
-        Retrieve attachment data for a message from the database.
-
-        Queries database for cached file_id and local_path to avoid re-uploading.
-        Falls back to retroactive processing only if database has no records.
-        Returns list of content blocks ready for Claude API.
-        """
+        """Build content blocks for a message's attachments (images only)."""
         if not self.attachment_manager:
             return []
 
         attachment_blocks = []
 
         try:
-            # Query for complete attachment metadata (including cached file_id)
             async with self.attachment_manager.attachment_db.db.execute(
-                """SELECT attachment_id, filename, attachment_type, file_id, local_path,
+                """SELECT attachment_id, filename, attachment_type, local_path,
                           processed_base64, processed_mime
                    FROM attachments WHERE message_id = ?""",
                 (message_id,)
             ) as cursor:
                 rows = await cursor.fetchall()
 
-            # If no cached data, fall back to retroactive processing
-            if not rows:
-                logger.debug(f"No cached attachments for message {message_id}, using retroactive processing")
-                return await self._retroactive_attachment_processing(message_id)
-
-            # Use cached data from database
             for row in rows:
-                attachment_id, filename, att_type, file_id, local_path, cached_base64, cached_mime = row
+                attachment_id, filename, att_type, local_path, cached_base64, cached_mime = row
 
                 try:
                     if att_type == "image":
-                        # Check for cached base64 first
                         if cached_base64 and cached_mime:
                             attachment_blocks.append({
                                 "type": "image",
@@ -655,14 +578,10 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
                             })
                             logger.debug(f"Loaded cached image from DB: {filename}")
                         elif local_path:
-                            # Load from local storage
                             import base64
                             file_bytes = await self.attachment_manager.local_storage.load(local_path)
                             base64_data = base64.standard_b64encode(file_bytes).decode('utf-8')
-
-                            # Determine media type from filename
-                            media_type = self._get_media_type_from_filename(filename)
-
+                            media_type = AttachmentClassifier.image_media_type(filename)
                             attachment_blocks.append({
                                 "type": "image",
                                 "source": {
@@ -672,34 +591,14 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
                                 }
                             })
                             logger.debug(f"Loaded image from local storage: {filename}")
-                        else:
-                            # Fall back to retroactive for this attachment
-                            logger.warning(f"No cached data for image {filename}, using retroactive")
-                            fallback_data = await self._process_single_attachment_fallback(attachment_id, filename)
-                            if fallback_data:
-                                attachment_blocks.append(fallback_data)
-
-                    elif att_type in ("document", "code"):
-                        # Use cached file_id (NO re-upload!)
-                        if file_id:
-                            attachment_blocks.append({
-                                "type": "document",
-                                "source": {
-                                    "type": "file",
-                                    "file_id": file_id
-                                }
-                            })
-                            logger.debug(f"Loaded document from DB cache: {filename} ({file_id})")
-                        else:
-                            # Fall back to retroactive for this attachment
-                            logger.warning(f"No file_id for document {filename}, using retroactive")
-                            fallback_data = await self._process_single_attachment_fallback(attachment_id, filename)
-                            if fallback_data:
-                                attachment_blocks.append(fallback_data)
+                    else:
+                        attachment_blocks.append({
+                            "type": "text",
+                            "text": f"\n[Attachment: {filename}]"
+                        })
 
                 except Exception as e:
                     logger.error(f"Failed to load cached attachment {filename}: {e}")
-                    # Add placeholder
                     attachment_blocks.append({
                         "type": "text",
                         "text": f"\n[Attachment: {filename} - no longer available]"
@@ -709,77 +608,6 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
             logger.error(f"Failed to query attachments for message {message_id}: {e}")
 
         return attachment_blocks
-
-    async def _retroactive_attachment_processing(self, message_id: str) -> List[Dict]:
-        """
-        Fallback: Use retroactive processing when database has no cached data.
-
-        This maintains backwards compatibility for messages processed before caching was added.
-        """
-        attachment_blocks = []
-
-        try:
-            async with self.attachment_manager.attachment_db.db.execute(
-                "SELECT attachment_id, filename FROM attachments WHERE message_id = ?",
-                (message_id,)
-            ) as cursor:
-                rows = await cursor.fetchall()
-
-            for row in rows:
-                attachment_id, filename = row
-                block = await self._process_single_attachment_fallback(attachment_id, filename)
-                if block:
-                    attachment_blocks.append(block)
-
-        except Exception as e:
-            logger.error(f"Retroactive processing failed for message {message_id}: {e}")
-
-        return attachment_blocks
-
-    async def _process_single_attachment_fallback(self, attachment_id: str, filename: str):
-        """
-        Process a single attachment via retroactive processing fallback.
-
-        Returns a content block dict or None if processing fails.
-        """
-        try:
-            file_data = await self.attachment_manager.get_attachment_for_processing(attachment_id)
-
-            if file_data:
-                if file_data["method"] == "base64":
-                    logger.debug(f"Retrieved image {filename} via retroactive processing")
-                    return {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": file_data["media_type"],
-                            "data": file_data["data"]
-                        }
-                    }
-                elif file_data["method"] == "file_id":
-                    if file_data.get("use_as_document_block", True):
-                        logger.debug(f"Retrieved document {filename} via retroactive processing")
-                        return {
-                            "type": "document",
-                            "source": {
-                                "type": "file",
-                                "file_id": file_data["data"]
-                            }
-                        }
-                    else:
-                        logger.debug(f"Retrieved code file {filename} via retroactive processing")
-                        return {
-                            "type": "text",
-                            "text": f"\n[Attached file: {filename} - available to code execution]"
-                        }
-        except Exception as e:
-            logger.warning(f"Retroactive processing failed for {filename}: {e}")
-            return {
-                "type": "text",
-                "text": f"\n[Attachment: {filename} - no longer available]"
-            }
-
-        return None
 
     @staticmethod
     def _get_media_type_from_filename(self, filename: str) -> str:
@@ -880,11 +708,11 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
 
     async def process_attachments(self, message: discord.Message) -> List[Dict]:
         """
-        Process all attachments (images, documents, spreadsheets, etc.) into Claude API format.
+        Process all attachments into content blocks.
 
-        Handles both base64 (images) and file_id (documents) formats.
-        Limits attachments to API maximum.
-        Returns list of processed attachment content blocks.
+        Images are encoded as base64 image blocks; other files are stored
+        locally and listed for later retrieval. Limits attachments to the
+        API maximum.
         """
         if not message.attachments:
             return []
@@ -909,9 +737,7 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
 
                     if result and result.get("for_api"):
                         api_data = result["for_api"]
-
                         if api_data["method"] == "base64":
-                            # Image: base64 format
                             processed_attachments.append({
                                 "type": "image",
                                 "source": {
@@ -921,27 +747,6 @@ CRITICAL: Do NOT narrate your thought process, explain your reasoning, or descri
                                 }
                             })
                             logger.info(f"Processed image via attachment manager: {attachment.filename}")
-
-                        elif api_data["method"] == "file_id":
-                            # Files API: check if should be document block or text mention
-                            if api_data.get("use_as_document_block", True):
-                                # PDF/plaintext: add as document content block for direct viewing
-                                processed_attachments.append({
-                                    "type": "document",
-                                    "source": {
-                                        "type": "file",
-                                        "file_id": api_data["data"]
-                                    }
-                                })
-                                logger.info(f"Processed document block: {attachment.filename}")
-                            else:
-                                # Code execution files: container_upload block
-                                # Bug #25 fix: Use container_upload instead of text mention
-                                processed_attachments.append({
-                                    "type": "container_upload",
-                                    "file_id": api_data['data']
-                                })
-                                logger.info(f"Processed code execution file: {attachment.filename} (file_id: {api_data['data']})")
 
                 else:
                     # Fallback: use ImageProcessor directly (backward compatibility, images only)

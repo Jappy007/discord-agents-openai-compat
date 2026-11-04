@@ -94,7 +94,7 @@ function copyFiltered(src, dest) {
   // 5. prove the bundle stands alone: the embedded python imports the stack
   log("smoke test: embedded interpreter imports the framework deps…");
   execFileSync(path.join(RUNTIME, "python.exe"),
-    ["-c", "import discord, anthropic, aiohttp, aiosqlite, yaml, PIL, dotenv; print('bundle ok')"],
+    ["-c", "import discord, openai, aiohttp, aiosqlite, yaml, PIL, dotenv; print('bundle ok')"],
     { stdio: "inherit", cwd: BUNDLE });
 
   log("bundle staged: app/bundle/{runtime,framework}");

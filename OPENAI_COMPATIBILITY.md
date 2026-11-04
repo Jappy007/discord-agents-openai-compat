@@ -1,86 +1,80 @@
-# OpenAI-compatible endpoint support
+# OpenAI Compatibility
 
-This project talks to Anthropic's Messages API by default. Setting
-`LLM_PROVIDER=openai_compatible` in `.env` switches every model call over to
-an OpenAI-compatible `/chat/completions` endpoint instead — OpenAI itself,
-OpenRouter, Together, Groq, a local Ollama/vLLM/LM Studio server, or anything
-else that speaks the same wire format.
+This project is built exclusively for OpenAI-compatible endpoints. Every model
+call goes through `core/llm_providers/openai_compatible.py`, which talks to any
+`/chat/completions` API:
 
-Everything needed to point at a new API lives in `.env` — no code or YAML
-changes required. See `.env.example` for the full list of `OPENAI_*` keys.
+- OpenAI
+- OpenRouter, Together, Groq, and similar hosted providers
+- Local servers such as Ollama, LM Studio, and vLLM
+
+## Configuration
+
+Set these in `.env`:
+
+```bash
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://api.openai.com/v1
+# Optional; overrides api.model from bots/<bot>.yaml
+OPENAI_MODEL=gpt-4o
+# Optional; caps outgoing max_tokens
+OPENAI_MAX_OUTPUT_TOKENS=16384
+# Optional; model for episode distillation and watch evaluation
+OPENAI_UTILITY_MODEL=gpt-4o-mini
+```
+
+`OPENAI_API_KEY` and `OPENAI_BASE_URL` are required. A model must be configured
+either through `OPENAI_MODEL` or `api.model` in the bot YAML.
 
 ## How it works
 
-`core/llm_providers/openai_compatible.py` implements `OpenAICompatibleClient`,
-a drop-in stand-in for `anthropic.AsyncAnthropic` with the same attribute
-shape (`client.beta.messages.stream()`, `client.messages.create()`, etc). It
-translates Anthropic's message/tool-block format to and from OpenAI's format
-at the boundary, so the rest of the codebase (conversation state, context
-building, memory, episodes) is unaware of which provider is in use.
+`OpenAICompatibleClient` exposes the client shape the shared code expects
+(`client.messages.create`, `client.beta.messages.stream`, and responses with
+`.content`, `.stop_reason`, `.usage`). At the boundary it translates:
 
-## What's translated (works on either provider)
+- system prompt (string or text blocks) → OpenAI system message
+- text / tool_use / tool_result blocks → OpenAI messages + `tool_calls`
+- image blocks (base64 or URL) → OpenAI `image_url` parts
+- `tools[].input_schema` → OpenAI function `parameters`
+- `output_config.format.json_schema` → `response_format` (best effort)
+- OpenAI completion → the internal response shape
 
-- Core conversation loop and client-side tool-calling (Discord actions,
-  memory-search tools, repository tool, custom/MCP tools, etc.)
-- Vision — image attachments are translated to OpenAI's `image_url` /
-  base64-data-URL format
-- Structured JSON output (used for episode-title distillation and
-  standing-watch evaluation) — translated to OpenAI's
-  `response_format={"type": "json_schema", ...}` on a best-effort basis.
-  Not every OpenAI-compatible backend supports strict JSON-schema mode; if
-  yours doesn't, these two features will log an error and back off rather
-  than crash anything else.
-- The two hardcoded Claude model names used for those small internal calls
-  (episode distillation, watch-eval) are substituted with `OPENAI_UTILITY_MODEL`
-  (or `OPENAI_MODEL`) when set.
-- **The built-in memory tool** — Anthropic's native `memory_20250818` server
-  type carries no schema of its own; under `openai_compatible` it's declared
-  as an explicit function-tool schema instead (`core/memory_tool_executor.py:MEMORY_TOOL_SCHEMA`).
-  The actual read/write logic was always local (`MemoryToolExecutor`), so
-  memory works identically on either provider.
-- **Web search / web fetch** — Anthropic's native server tools are replaced
-  under `openai_compatible` with ordinary function tools
-  (`tools/client_web_tools.py`). Search uses DuckDuckGo via the `ddgs`
-  package - no API key, account, or card needed. It's a scrape of
-  DuckDuckGo/Bing's public result pages rather than an official API, so
-  it's less reliable than a paid provider (can break if their markup
-  changes, or get rate-limited under heavy use) - that's the trade-off for
-  zero setup. Want something sturdier later, swap `execute_web_search` in
-  `tools/client_web_tools.py` for a paid provider (Brave, Tavily, SerpAPI).
+Only client-side function tools are supported.
 
-## What's disabled under `LLM_PROVIDER=openai_compatible`
+## What works
 
-These are genuine Anthropic server-side features with no OpenAI-compatible
-equivalent. Each disables itself cleanly (a one-time warning in the logs, no
-crash) rather than failing loudly mid-conversation:
-
-| Feature | Behavior |
+| Feature | Status |
 |---|---|
-| Code execution / Skills | Never registered as a tool; `skills_manager` fails its init check and disables itself entirely (`bot.skills_manager = None`) |
-| Files API (attachment uploads, container-output delivery) | Upload/delete/retrieve calls raise `FeatureNotSupportedError`, caught by existing call sites |
-| Prompt caching (`cache_control`) | Silently ignored — no error, just no caching benefit |
-| Extended thinking / `effort` | Ignored with a one-time warning; no equivalent reasoning-trace format is assumed |
-| Batches API — weekly memory reconsolidation, induction | Disabled at startup (main bot process) and refuses to run (`--consolidate` / `--induct` CLI commands print a clear error and exit) |
+| Core conversation | Full support |
+| Client-side tool calling | Full support |
+| Vision / image attachments | Full support (base64 data URLs) |
+| Memory | Full support: the memory tool is declared as an explicit function schema and executed locally |
+| Episode distillation | Full support via `response_format` JSON schema (backend permitting) |
+| Client-side web search / fetch | Full support via the keyless `ddgs` backend |
+| `create_pptx` | Full support; builds the file locally and attaches it to the reply |
+| MCP tools | Full support |
+| `ask_prime` cross-server messaging | Full support |
 
-## Known gap
+## What is not supported
 
-`supervisor/` (the optional localhost setup-wizard web UI) only has a "set
-Anthropic key" flow (`PUT /api/setup/anthropic`, which validates the key
-against Anthropic's API). It hasn't been extended for `openai_compatible` —
-if you use the supervisor UI, you'll still need to set the `OPENAI_*` /
-`LLM_PROVIDER` values directly in `.env` rather than through that UI. This
-wasn't in scope for the initial pass; flag it if you want it wired up.
+The following were provider-specific server-side features and have been removed:
 
-## Picking a provider
+- Code execution / skills containers
+- Files API attachment uploads
+- Batches API
+- Native web search / fetch server tools
+- Extended thinking / effort parameters
+- Prompt caching (`cache_control`)
 
-Not every model handles tool-calling and vision equally well. If you hit
-issues:
-- Confirm your target model supports OpenAI-style function/tool calling —
-  the bot relies on it for almost everything (Discord actions, memory
-  search, etc), not just optional extras.
-- If your provider doesn't support `response_format: json_schema`, episode
-  titles and standing watches will just stop updating (logged, non-fatal) —
-  everything else keeps working.
-- `OPENAI_MAX_OUTPUT_TOKENS` matters: the built-in per-model token-cap table
-  only recognizes Claude model names, so unset it defaults to whatever
-  `max_tokens` the bot's YAML specifies uncapped by a model-specific ceiling.
+Attachments are stored locally. Images are sent inline as base64; other files
+remain on disk and are referenced by path through the attachment tools.
+
+## Notes on backends
+
+- `response_format` with JSON schema is not implemented by every
+  OpenAI-compatible server. Episode distillation catches and logs failures.
+- Some local servers ignore `OPENAI_API_KEY`; any non-empty placeholder works.
+- Model names are provider-specific. Nothing in the codebase assumes a
+  particular model family.
+- Token usage/cost: token counts are reported when the endpoint returns them;
+  dollar cost is not estimated because prices vary by endpoint and model.

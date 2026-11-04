@@ -20,13 +20,10 @@ from core.internal_constants import (
     PROACTIVE_INTENSITY_PRESETS,
     ENGAGEMENT_TRACKING_DELAY_SECONDS,
     IGNORE_THRESHOLD,
-    SKILLS_CACHE_FILE,
     MCP_CONFIG_FILE,
-    WEB_SEARCH_CITATIONS_ENABLED,
     PROACTIVE_LEARNING_WINDOW_DAYS,
     PROACTIVE_ENGAGEMENT_THRESHOLD,
     PROACTIVE_MIN_PROVOCATION_GAP_HOURS,
-    model_supports_effort,
 )
 
 
@@ -84,73 +81,27 @@ class ProactiveConfig:
 
 
 @dataclass
-class ConsolidationConfig:
-    """Weekly memory reconsolidation (Batches API). Costs tokens, so it's
-    opt-out and its cadence is tunable - longer interval = cheaper, less fresh."""
-    enabled: bool = True
-    interval_days: int = 7
-
-
-@dataclass
 class AgenticConfig:
     """Agentic engine configuration"""
     enabled: bool = False
     check_interval_hours: float = 1.0  # Background loop frequency
     followups: FollowupsConfig = field(default_factory=FollowupsConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
-    consolidation: ConsolidationConfig = field(default_factory=ConsolidationConfig)
-
-
-@dataclass
-class ThinkingConfig:
-    """Adaptive thinking configuration (model decides when/how much to think)"""
-    enabled: bool = True
-
-
-@dataclass
-class WebSearchConfig:
-    """Web search configuration - all or nothing (no rate limits)"""
-    enabled: bool = False
-
-
-@dataclass
-class CodeExecutionConfig:
-    """Code execution tool configuration - always enabled when skills are used"""
-    # Note: enabled field removed in v0.5.1 (Bug #14 fix)
-    # Code execution is now automatically enabled when skills are loaded
-    pass
 
 
 @dataclass
 class APIConfig:
-    """Claude API configuration"""
-    model: str = "claude-sonnet-5"
+    """LLM API configuration"""
+    model: str = ""  # falls back to OPENAI_MODEL when empty
     max_tokens: int = 4096
     context_messages: int = 30  # Messages to remember (rolling window)
     context_tokens: int = 80000  # Session token threshold: episodize + reseed past this (from response.usage)
-    effort: Optional[str] = None  # low | medium | high | max (None = API default, high)
-    consolidation_model: str = "claude-sonnet-5"  # weekly memory reconsolidation (Batches API)
-    thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
-    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
-    code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
 
 
 @dataclass
 class MCPConfig:
     """MCP (Model Context Protocol) server configuration"""
     enabled: bool = False
-
-
-@dataclass
-class SkillsConfig:
-    """Skills auto-discovery configuration - always enabled"""
-    # Note: enabled field removed in v0.5.1 (Bug #14 fix)
-    # Skills are now always enabled; code_execution is automatically enabled with them
-    include_anthropic_skills: bool = True  # Include built-in xlsx, pptx, docx, pdf
-    # Skills preloaded at conversation start (v0.5.0 Progressive Disclosure).
-    # Empty by default - Claude requests any skill (pdf, xlsx, …) on demand via
-    # request_skill the moment it's needed, so nothing has to be preloaded.
-    default_skills: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -188,7 +139,7 @@ class MinecraftConfig:
     host: str = "localhost"
     port: int = 25565
     version: str = "1.26.2"
-    username: str = "ClaudeBot"
+    username: str = "DiscordBot"
     auth: str = "microsoft"  # microsoft | offline
     spawn_radius_protection: int = 100
     idle_autonomous_minutes: int = 5
@@ -201,7 +152,7 @@ class DiscordConfig:
     token_env_var: str = "DISCORD_BOT_TOKEN"  # Environment variable containing bot token
     servers: List[str] = field(default_factory=list)  # Guild IDs
     timezone: str = "Europe/Copenhagen"  # Default server timezone (IANA format)
-    status: str = "Powered by Claude"  # Bot activity status
+    status: str = "Online"  # Bot activity status
     allow_bot_interactions: bool = False  # Allow responding to other bots
     backfill_enabled: bool = True
     backfill_days: int = 30  # 0 = unlimited
@@ -247,7 +198,6 @@ class BotConfig:
 
     # v0.5.0+ features
     mcp: MCPConfig = field(default_factory=MCPConfig)
-    skills: SkillsConfig = field(default_factory=SkillsConfig)
     vaults: List[str] = field(default_factory=list)  # channel/server IDs whose content never leaves them
     attachments: AttachmentsConfig = field(default_factory=AttachmentsConfig)
 
@@ -318,15 +268,12 @@ class BotConfig:
             "agentic.proactive.learning_window_days": "Internalized",
             "logging.max_size_mb": "Internalized - no longer configurable",
             "logging.backup_count": "Internalized - no longer configurable",
-            "skills.cache_file": "Internalized - no longer configurable",
             "mcp.config_file": "Internalized - always uses mcp_servers.json",
             "images.compression_target": "Internalized - no longer configurable",
             "multimedia": "Removed - use attachments instead",
             "discord.backfill_unlimited": "Removed - use backfill_days: 0 for unlimited",
             "discord.backfill_in_background": "Internalized - always runs in background",
             "discord.default_timezone": "Renamed to discord.timezone",
-            "skills.enabled": "Removed - skills are always enabled (Bug #14 fix)",
-            "api.code_execution.enabled": "Removed - code_execution is automatically enabled with skills (Bug #14 fix)",
             "data_isolation": "Replaced by vaults: [channel/server IDs] - content of a vaulted place never leaves it; the old scope modes are gone",
         }
 
@@ -360,7 +307,7 @@ class BotConfig:
             token_env_var=discord_data.get("token_env_var", "DISCORD_BOT_TOKEN"),
             servers=discord_data.get("servers", []),
             timezone=discord_data.get("timezone", discord_data.get("default_timezone", "UTC")),
-            status=discord_data.get("status", "Powered by Claude"),
+            status=discord_data.get("status", "Online"),
             allow_bot_interactions=discord_data.get("allow_bot_interactions", False),
             backfill_enabled=discord_data.get("backfill_enabled", True),
             backfill_days=discord_data.get("backfill_days", 30),
@@ -391,37 +338,15 @@ class BotConfig:
             allowed_channels=proactive_data.get("allowed_channels", []),
         )
 
-        consolidation_data = agentic_data.get("consolidation", {})
-        consolidation = ConsolidationConfig(
-            enabled=consolidation_data.get("enabled", True),
-            interval_days=int(consolidation_data.get("interval_days", 7)),
-        )
-
         agentic = AgenticConfig(
             enabled=agentic_data.get("enabled", False),
             check_interval_hours=agentic_data.get("check_interval_hours", 1.0),
             followups=followups,
             proactive=proactive,
-            consolidation=consolidation,
         )
 
         # Parse API config
         api_data = data.get("api", {})
-
-        # "extended_thinking" fallback accepts pre-v0.6.0 configs (budget_tokens ignored)
-        thinking_data = api_data.get("thinking", api_data.get("extended_thinking", {}))
-        thinking = ThinkingConfig(
-            enabled=thinking_data.get("enabled", True),
-        )
-
-        web_search_data = api_data.get("web_search", {})
-        web_search = WebSearchConfig(
-            enabled=web_search_data.get("enabled", False),
-        )
-
-        # CodeExecutionConfig no longer has enabled field (Bug #14 fix)
-        # It's automatically enabled when skills are loaded
-        code_execution = CodeExecutionConfig()
 
         # Handle legacy context_management structure
         context_management_data = api_data.get("context_management", {})
@@ -435,26 +360,17 @@ class BotConfig:
         )
 
         api = APIConfig(
-            model=api_data.get("model", "claude-sonnet-5"),
+            model=api_data.get("model", ""),
             max_tokens=api_data.get("max_tokens", 4096),
             context_messages=context_messages,
             context_tokens=context_tokens,
-            effort=api_data.get("effort"),
-            consolidation_model=api_data.get("consolidation_model", "claude-sonnet-5"),
-            thinking=thinking,
-            web_search=web_search,
-            code_execution=code_execution,
         )
 
-        # LLM_PROVIDER=openai_compatible: OPENAI_MODEL (.env) overrides the
-        # yaml model/consolidation_model, since a Claude model name means
-        # nothing to a different provider. Keeps "everything needed for a
-        # new API" in .env rather than requiring a yaml edit per bot.
-        if (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower() == "openai_compatible":
-            env_model = os.getenv("OPENAI_MODEL")
-            if env_model:
-                api.model = env_model
-                api.consolidation_model = env_model
+        # OPENAI_MODEL (.env) overrides the yaml model, so a single API
+        # endpoint can be pointed at without editing every bot YAML.
+        env_model = os.getenv("OPENAI_MODEL")
+        if env_model:
+            api.model = env_model
 
         # Parse logging config
         logging_data = data.get("logging", {})
@@ -467,14 +383,6 @@ class BotConfig:
         mcp_data = data.get("mcp", {})
         mcp = MCPConfig(
             enabled=mcp_data.get("enabled", False),
-        )
-
-        # SkillsConfig no longer has enabled field (Bug #14 fix)
-        # Skills are always enabled
-        skills_data = data.get("skills", {})
-        skills = SkillsConfig(
-            include_anthropic_skills=skills_data.get("include_anthropic_skills", True),
-            default_skills=skills_data.get("default_skills", []),
         )
 
         # Parse attachments config
@@ -517,7 +425,6 @@ class BotConfig:
             api=api,
             logging=logging_config,
             mcp=mcp,
-            skills=skills,
             vaults=[str(v) for v in (data.get("vaults") or [])],
             attachments=attachments,
         )
@@ -545,17 +452,12 @@ class BotConfig:
             elif not os.getenv(self.discord.token_env_var):
                 errors.append(f"Missing environment variable: {self.discord.token_env_var}")
 
-        provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
-        if provider == "anthropic":
-            if not os.getenv("ANTHROPIC_API_KEY"):
-                errors.append("Missing ANTHROPIC_API_KEY in environment")
-        elif provider == "openai_compatible":
-            if not os.getenv("OPENAI_API_KEY"):
-                errors.append("Missing OPENAI_API_KEY in environment (required when LLM_PROVIDER=openai_compatible)")
-            if not os.getenv("OPENAI_BASE_URL"):
-                errors.append("Missing OPENAI_BASE_URL in environment (required when LLM_PROVIDER=openai_compatible)")
-        else:
-            errors.append(f"Unknown LLM_PROVIDER '{provider}' - expected 'anthropic' or 'openai_compatible'")
+        if not os.getenv("OPENAI_API_KEY"):
+            errors.append("Missing OPENAI_API_KEY in environment")
+        if not os.getenv("OPENAI_BASE_URL"):
+            errors.append("Missing OPENAI_BASE_URL in environment")
+        if not self.api.model and not os.getenv("OPENAI_MODEL"):
+            errors.append("No model configured - set api.model in the bot YAML or OPENAI_MODEL in .env")
 
         # Type validation
         if getattr(self, "mode", "discord") != "minecraft":
@@ -569,26 +471,6 @@ class BotConfig:
         # Validate API config
         if self.api.max_tokens <= 0:
             errors.append("api.max_tokens must be positive")
-
-        if self.api.effort is not None and self.api.effort not in ("low", "medium", "high", "max"):
-            errors.append(
-                f"api.effort must be one of low/medium/high/max, got '{self.api.effort}'"
-            )
-
-        if self.api.effort is not None and not model_supports_effort(self.api.model):
-            errors.append(
-                f"api.effort is set but model '{self.api.model}' does not support the "
-                f"effort parameter (every API call would 400) - remove api.effort or "
-                f"switch to an effort-capable model"
-            )
-
-        if "haiku" in self.api.model and self.api.thinking.enabled:
-            errors.append(
-                f"api.model '{self.api.model}' is set with api.thinking.enabled "
-                f"(every API call would send adaptive thinking, which Haiku doesn't "
-                f"reliably support) - disable api.thinking or switch the main chat "
-                f"model off Haiku"
-            )
 
         if self.api.context_tokens <= 0:
             errors.append("api.context_tokens must be positive")
@@ -613,9 +495,6 @@ class BotConfig:
 
         if not isinstance(self.vaults, list) or any(not str(v).strip() for v in self.vaults):
             errors.append("vaults must be a list of channel/server IDs")
-
-        if not self.api.consolidation_model or not self.api.consolidation_model.strip():
-            errors.append("api.consolidation_model cannot be empty")
 
         # Validate logging level
         valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
@@ -653,27 +532,11 @@ class BotConfig:
             "engagement_tracking_delay": ENGAGEMENT_TRACKING_DELAY_SECONDS,
         }
 
-    def get_skills_config(self):
-        """Get full skills configuration with internal values"""
-        return {
-            "enabled": True,  # Always enabled (Bug #14 fix)
-            "skills_dir": "skills",  # Standardized
-            "cache_file": SKILLS_CACHE_FILE,
-            "include_anthropic_skills": self.skills.include_anthropic_skills,
-        }
-
     def get_mcp_config(self):
         """Get full MCP configuration with internal values"""
         return {
             "enabled": self.mcp.enabled,
             "config_file": MCP_CONFIG_FILE,
-        }
-
-    def get_web_search_config(self):
-        """Get web search configuration - all or nothing, no rate limits"""
-        return {
-            "enabled": self.api.web_search.enabled,
-            "citations_enabled": WEB_SEARCH_CITATIONS_ENABLED,
         }
 
     def get_proactive_config(self):

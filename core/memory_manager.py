@@ -1,8 +1,8 @@
 """
-Memory Manager - Wrapper for Anthropic's Memory Tool
+Memory Manager - Wrapper for the memory tool
 
 Provides standardized paths and read access to memory files.
-Bot writes via Claude's memory tool, not this manager.
+Bot writes via the memory tool, not this manager.
 """
 
 import json
@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 
 class MemoryManager:
     """
-    Path helpers and read access for Anthropic's memory tool.
+    Path helpers and read access for the memory tool.
 
-    Memory writes happen via Claude API memory tool calls, not this class.
+    Memory writes happen via model API memory tool calls, not this class.
     This manager provides standardized paths and system-level reads.
     """
 
@@ -78,9 +78,7 @@ class MemoryManager:
 
     def get_server_character_path(self, server_id: str) -> str:
         """Operator-authored note declaring what this server IS — its nature and
-        social register. Optional, never auto-written (unlike culture.md, which
-        the consolidator rewrites). Read by induction and consolidation to steer
-        what's worth keeping."""
+        social register. Optional, never auto-written."""
         return f"/memories/{self.bot_id}/servers/{server_id}/character.md"
 
     def get_followups_path(self, server_id: str) -> str:
@@ -105,8 +103,8 @@ class MemoryManager:
         """
         System-level write for follow-up completion/cleanup.
 
-        Used when the system completes follow-ups, not for Claude-initiated creation.
-        Claude creates follow-ups via memory tool.
+        Used when the system completes follow-ups, not for model-initiated creation.
+        The model creates follow-ups via the memory tool.
         """
         path = self.get_followups_path(server_id)
         file_path = self.resolve_path(path)
@@ -192,7 +190,7 @@ class MemoryManager:
         """
         System-level write of a memory file (used by the episodizer).
 
-        Claude writes via the memory tool; this is for framework-owned files.
+        The model writes via the memory tool; this is for framework-owned files.
         """
         file_path = self.resolve_path(path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,9 +216,9 @@ class MemoryManager:
         self, server_id: str, channel_id: str, user_ids: List[str]
     ) -> str:
         """
-        Build context block listing available memory files for Claude to read.
+        Build context block listing available memory files for the model to read.
 
-        Claude uses memory tool to actually read these files.
+        The model uses the memory tool to actually read these files.
         This just provides paths in a formatted context block.
         """
         context_parts = []

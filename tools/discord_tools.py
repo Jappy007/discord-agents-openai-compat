@@ -1,7 +1,7 @@
 """
 Discord Tools - Message Search and User/Channel Info
 
-Provides Claude with tools to:
+Provides the model with tools to:
 - Search message history with FTS5 full-text search
 - Look up user information
 - Get channel metadata
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class DiscordToolExecutor:
     """
-    Executes Discord tool commands for Claude API.
+    Executes Discord tool commands for the model API.
     Routes commands to appropriate handlers.
     """
 
@@ -586,7 +586,7 @@ class DiscordToolExecutor:
 
 def get_discord_tools() -> list:
     """
-    Generate Discord tool definitions for Claude API.
+    Generate Discord tool definitions for the model API.
 
     Designed for agentic exploration: search for keywords, then view context around results.
     """

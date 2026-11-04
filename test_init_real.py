@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 Real initialization test: exercises the actual BotManager.initialize()
-path with mocked network I/O. Uses real packages (discord, anthropic,
+path with mocked network I/O. Uses real packages (discord, openai,
 yaml, aiofiles, aiosqlite, etc.) — not stubs.
 
 What this validates:
   1. Config loads and validates (real YAML, real dataclasses)
   2. SQLite databases create and initialize (real aiosqlite)
   3. ReactiveEngine constructs with all real managers
-  4. AgenticEngine + Consolidator + WatchManager construct
+  4. AgenticEngine + WatchManager construct
   5. DiscordClient constructs with everything wired
   6. Our deque fix survives the real constructor
   7. Async shutdown path runs to completion
@@ -25,9 +25,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-os.environ["ANTHROPIC_API_KEY"] = "sk-test-real-init-validation"
+os.environ["OPENAI_API_KEY"] = "sk-test-real-init-validation"
+os.environ["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
+os.environ["OPENAI_MODEL"] = "test-model"
 os.environ["ALPHA_BOT_TOKEN"] = "MTIxMjM0NTY3ODkw.real-init-validation"
-os.environ["LLM_PROVIDER"] = "anthropic"
 
 
 async def run_test():
@@ -117,7 +118,6 @@ async def run_test():
             rate_limiter=rl,
             message_memory=msg_memory,
             memory_manager=memory_manager,
-            anthropic_api_key="sk-test-real-init-validation",
             conversation_logger=conv_logger,
             user_cache=user_cache,
         )
@@ -144,27 +144,13 @@ async def run_test():
                 config=config,
                 memory_manager=memory_manager,
                 message_memory=msg_memory,
-                anthropic_client=re.anthropic,
+                llm_client=re.llm,
             )
             print(f"  ✓ AgenticEngine constructed")
 
-        # ── Phase 7: MemoryConsolidator ───────────────────────────────
+        # ── Phase 7: WatchManager ─────────────────────────────────────
         if agentic_engine:
-            print("\n[Phase 7] Constructing MemoryConsolidator")
-            from core.consolidator import MemoryConsolidator
-            consolidator = MemoryConsolidator(
-                bot_id=config.bot_id,
-                config=config,
-                message_memory=msg_memory,
-                memory_manager=memory_manager,
-                user_cache=user_cache,
-                anthropic_client=re.anthropic,
-                vaults=re.vaults,
-            )
-            agentic_engine.consolidator = consolidator
-            print(f"  ✓ MemoryConsolidator")
-
-            print("\n[Phase 7b] Constructing WatchManager")
+            print("\n[Phase 7] Constructing WatchManager")
             from core.watch_manager import WatchManager
             watches_path = memory_manager.resolve_path(
                 f"/memories/{config.bot_id}/global/watches.json")
@@ -190,19 +176,11 @@ async def run_test():
 
         # ── Phase 9: Async init on reactive engine ────────────────────
         print("\n[Phase 9] Running ReactiveEngine.async_initialize() (real I/O)")
-        # Mock the Anthropic client to avoid API calls
-        re.anthropic = MagicMock()
-        re.anthropic.beta = MagicMock()
-        re.anthropic.beta.messages = MagicMock()
-        re.anthropic.beta.messages.stream = MagicMock()
-        re.anthropic.beta.files = MagicMock()
-        re.anthropic.beta.files.delete = AsyncMock()
-        re.anthropic.beta.files.retrieve_metadata = AsyncMock(return_value=MagicMock(
-            id="file_test", filename="test.txt", size_bytes=100,
-            mime_type="text/plain", created_at="2026-01-01"
-        ))
-        re.anthropic.beta.files.download = AsyncMock()
-        re.files_api_client.anthropic = re.anthropic
+        # Mock the LLM client to avoid API calls
+        re.llm = MagicMock()
+        re.llm.beta = MagicMock()
+        re.llm.beta.messages = MagicMock()
+        re.llm.beta.messages.stream = MagicMock()
         try:
             await re.async_initialize()
             print(f"  ✓ async_initialize() completed")

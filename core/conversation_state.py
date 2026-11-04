@@ -21,7 +21,7 @@ class ConversationState:
     """
     Persistent conversation state for a single channel.
 
-    Holds the linear message list sent to the Claude API, with attachment IDs
+    Holds the linear message list sent to the chat model, with attachment IDs
     annotated directly on their message (no index-keyed side tables).
     """
 
@@ -34,15 +34,12 @@ class ConversationState:
         self.channel_id = channel_id
         self.max_messages = max_messages
 
-        # Messages array for Claude API (user/assistant role alternation)
+        # Messages array for the chat API (user/assistant role alternation)
         self.messages: List[Dict[str, Any]] = []
 
         # Statistics
         self.messages_removed = 0
         self.last_updated = datetime.utcnow()
-
-        # Active skills tracking (v0.5.0 Progressive Disclosure)
-        self.active_skills: List[str] = []
 
         # Session metadata (v0.6.0 episodic sessions)
         self.session_started_at = datetime.utcnow()
@@ -80,7 +77,7 @@ class ConversationState:
             if isinstance(content, list):
                 attachment_block_count = sum(
                     1 for block in content
-                    if block.get("type") in ("document", "container_upload", "image")
+                    if block.get("type") == "image"
                 )
                 if attachment_block_count > len(attachment_ids):
                     logger.warning(
@@ -279,60 +276,17 @@ class ConversationState:
             logger.info(f"Stubbed {stubbed} old tool result block(s) in channel {self.channel_id}")
         return stubbed
 
-    def swap_file_id(self, old_file_id: str, new_file_id: Optional[str]) -> int:
-        """
-        Replace a stale Files API id embedded in persisted messages (document /
-        container_upload blocks). With new_file_id=None the offending blocks are
-        dropped instead - a dead file_id 404s the WHOLE API request, bricking
-        the channel until the block rolls out of the cap.
-
-        Returns number of blocks touched.
-        """
-        touched = 0
-        for msg in self.messages:
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            kept = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("file_id") == old_file_id:
-                        if new_file_id:
-                            block["file_id"] = new_file_id
-                        else:
-                            touched += 1
-                            continue  # drop block
-                        touched += 1
-                    source = block.get("source")
-                    if isinstance(source, dict) and source.get("file_id") == old_file_id:
-                        if new_file_id:
-                            source["file_id"] = new_file_id
-                            touched += 1
-                        else:
-                            touched += 1
-                            continue  # drop block
-                kept.append(block)
-            msg["content"] = kept
-        if touched:
-            # Dropping blocks can leave empty messages, which the API rejects
-            self.messages = [
-                m for m in self.messages
-                if not (isinstance(m.get("content"), list) and not m["content"])
-            ]
-        return touched
-
     def get_messages_for_api(self) -> List[Dict[str, Any]]:
         """
-        Get messages array ready for Claude API.
+        Get messages array ready for the chat API.
 
-        Strips internal-only fields (message_type, attachment_ids). Server
-        tool blocks never reach persisted state (stripped at serialization
-        and healed at deserialization), so no block sanitization is needed.
+        Strips internal-only fields (message_type, attachment_ids). Legacy
+        server-tool blocks never reach persisted state (stripped at
+        serialization and healed at deserialization), so no block
+        sanitization is needed.
 
         String content is normalized to block form so every message has one
-        stable wire representation across turns - prompt caching matches on
-        the serialized prefix, and the per-turn cache breakpoint rides on a
-        content block (see with_message_cache_breakpoint in reactive_engine).
+        stable wire representation across turns.
 
         Returns:
             Copy of messages array without internal fields
@@ -371,57 +325,12 @@ class ConversationState:
             result.append(out)
         return result
 
-    def set_active_skills(self, skill_names: List[str], max_skills: int = 2) -> None:
-        """Set currently active skills for this conversation."""
-        self.active_skills = skill_names[:max_skills]
-        self.last_updated = datetime.utcnow()
-        logger.debug(f"Active skills set: {self.active_skills}")
-
-    def add_active_skill(self, skill_name: str, max_skills: int = 2) -> bool:
-        """
-        Add a skill to active skills list.
-
-        Returns:
-            True if added (or already active), False if at capacity
-        """
-        if skill_name in self.active_skills:
-            return True
-
-        if len(self.active_skills) >= max_skills:
-            return False
-
-        self.active_skills.append(skill_name)
-        self.last_updated = datetime.utcnow()
-        logger.debug(f"Added skill: {skill_name}. Active: {self.active_skills}")
-        return True
-
-    def replace_active_skill(self, old_skill: str, new_skill: str) -> bool:
-        """
-        Replace an active skill with a new one.
-
-        Returns:
-            True if replaced, False if old_skill not found
-        """
-        if old_skill not in self.active_skills:
-            return False
-
-        idx = self.active_skills.index(old_skill)
-        self.active_skills[idx] = new_skill
-        self.last_updated = datetime.utcnow()
-        logger.debug(f"Replaced skill {old_skill} with {new_skill}. Active: {self.active_skills}")
-        return True
-
-    def get_active_skills(self) -> List[str]:
-        """Get list of currently active skill names."""
-        return self.active_skills.copy()
-
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary for database storage."""
         return {
             "channel_id": self.channel_id,
             "max_messages": self.max_messages,
             "messages": self.messages,
-            "active_skills": self.active_skills,
             "messages_removed": self.messages_removed,
             "last_updated": self.last_updated.isoformat(),
             "session_started_at": self.session_started_at.isoformat(),
@@ -501,7 +410,6 @@ class ConversationState:
                 f"{stripped} legacy server block(s), {healed} spliced thinking block(s)"
             )
 
-        state.active_skills = data.get("active_skills", [])
         state.messages_removed = data.get("messages_removed", 0)
 
         if "last_updated" in data:

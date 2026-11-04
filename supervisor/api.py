@@ -9,7 +9,6 @@ import json
 import logging
 import re
 import shutil
-import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +22,7 @@ from core.config import BotConfig
 
 from .data import BotData
 from .env_store import EnvStore
-from .integrations import (add_skill, apply_skills, load_mcp_servers,
-                           remove_skill, save_mcp_servers, skills_catalog)
+from .integrations import load_mcp_servers, save_mcp_servers
 from .mcp_health import MCPHealthPoller
 from .paths import PathJailError, SupervisorRoot
 from .process_manager import ProcessManager
@@ -34,7 +32,6 @@ logger = logging.getLogger(__name__)
 BOT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
 
 DISCORD_API = "https://discord.com/api/v10"
-ANTHROPIC_API = "https://api.anthropic.com/v1"
 
 BOT_TEMPLATE = """\
 bot_id: {bot_id}
@@ -49,7 +46,7 @@ personality:
     You are {bot_id}, a thoughtful resident of this server.
 
 api:
-  model: "claude-sonnet-5"
+  model: ""
 """
 
 
@@ -67,7 +64,6 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
     app = web.Application()
     app["health"] = health
     app["started"] = datetime.now(timezone.utc).isoformat()
-    app["inducts"] = {}  # bot_id -> {proc, lines, dry_run, started, done}
 
     def known(bot_id: str) -> bool:
         return bot_id in root.bot_ids()
@@ -240,11 +236,6 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
         return json_response(await data.episodes_list(
             bot_id, min(int(request.query.get("tail", "50")), 500)))
 
-    async def get_skills(request):
-        bot_id = bot_or_404(request)
-        return json_response(await data.skills_list(
-            bot_id, min(int(request.query.get("tail", "50")), 500)))
-
     async def _follow_log(request, bot_id, which):
         """SSE tail: replay the last lines, then stream appended ones."""
         response = web.StreamResponse(headers={
@@ -346,22 +337,8 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
     # --- integrations -------------------------------------------------------------------
 
     async def get_integrations(request):
-        """The PROTOTYPE's shape: flat skills array + mcp_servers array."""
-        bot_id = bot_or_404(request)
-        config = data.load_config(bot_id)
-        catalog = skills_catalog(root, config)
-        used = await data.skills_list(bot_id, tail=500)
-        week_ago = datetime.now(timezone.utc).date().toordinal() - 7
-        skills = [{
-            "id": s["name"],
-            "name": s["name"],
-            "source": s["source"],
-            "enabled": s["enabled"],
-            "description": s["description"],
-            "used_7d": sum(
-                1 for u in used if u["name"] == s["name"]
-                and datetime.fromisoformat(u["ts"]).date().toordinal() > week_ago),
-        } for s in catalog["items"]]
+        """MCP servers for this bot."""
+        bot_or_404(request)
         mcp_servers = []
         for s in load_mcp_servers(root):
             st = health.status_for(s.get("name", "?"))
@@ -374,23 +351,15 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
                 "latency_ms": st["latency_ms"],
                 "last_check": st["last_check"],
                 "tools": st["tools"],
-                "error": st.get("error"),
+                "error": s.get("error"),
             })
-        return json_response({
-            "skills": skills,
-            "include_anthropic_skills": catalog["include_anthropic_skills"],
-            "mcp_servers": mcp_servers,
-        })
+        return json_response({"mcp_servers": mcp_servers})
 
     async def put_integrations(request):
-        """Accepts the UI's whole-object PUT: skills (with toggled enabled)
-        + mcp_servers (status fields stripped on save)."""
+        """Accepts the UI's whole-object PUT: mcp_servers array
+        (status fields stripped on save)."""
         bot_id = bot_or_404(request)
         body = await request.json()
-        if "skills" in body:
-            enabled = [s["name"] for s in body["skills"] if s.get("enabled")]
-            apply_skills(root, bot_id, enabled,
-                         body.get("include_anthropic_skills", True))
         if "mcp_servers" in body:
             cleaned = [{
                 "name": s.get("name"),
@@ -408,27 +377,6 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
             restarted = True
         return json_response({"saved": True, "restarted": restarted})
 
-    async def post_skill(request):
-        bot_or_404(request)
-        name = request.query.get("name", "")
-        blob = await request.read()
-        try:
-            added = add_skill(root, name, blob)
-        except ValueError as e:
-            return json_response({"error": str(e)}, status=400)
-        return json_response({"added": added}, status=201)
-
-    async def delete_skill(request):
-        bot_or_404(request)
-        name = request.match_info["name"]
-        try:
-            removed = remove_skill(root, name)
-        except (ValueError, PathJailError) as e:
-            return json_response({"error": str(e)}, status=400)
-        if not removed:
-            return json_response({"error": f"no such skill: {name}"}, status=404)
-        return json_response({"removed": name})
-
     async def reconnect_mcp(request):
         bot_or_404(request)
         name = request.match_info["name"]
@@ -442,34 +390,11 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
 
     async def get_setup(request):
         return json_response({
-            "anthropic_key_set": env.is_set("ANTHROPIC_API_KEY"),
+            "openai_key_set": env.is_set("OPENAI_API_KEY"),
+            "openai_base_url_set": env.is_set("OPENAI_BASE_URL"),
             "bots": [{"bot_id": b, "token_set": env.is_set(token_env_var(b))}
                      for b in root.bot_ids()],
         })
-
-    async def put_anthropic_key(request):
-        key = ((await request.json()).get("key") or "").strip()
-        if not key:
-            return json_response({"error": "key is required"}, status=400)
-        async with aiohttp.ClientSession() as s:
-            try:
-                async with s.get(f"{ANTHROPIC_API}/models", headers={
-                        "x-api-key": key, "anthropic-version": "2023-06-01"},
-                        timeout=aiohttp.ClientTimeout(total=15)) as r:
-                    if r.status == 401:
-                        return json_response(
-                            {"error": "Anthropic rejected that key - check it "
-                                      "and try again"}, status=400)
-                    if r.status != 200:
-                        return json_response(
-                            {"error": f"could not validate key "
-                                      f"(Anthropic returned {r.status})"}, status=502)
-            except aiohttp.ClientError as e:
-                return json_response(
-                    {"error": f"could not reach Anthropic: {e}"}, status=502)
-        env.set("ANTHROPIC_API_KEY", key)
-        logger.info("Anthropic API key set via UI (validated)")
-        return json_response({"saved": True})
 
     async def put_bot_token(request):
         bot_id = bot_or_404(request)
@@ -602,67 +527,6 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
         logger.info(f"Repository move for {bot_id}: {src} -> {dst}")
         return json_response({"moved": True, "from": src, "to": dst})
 
-    # --- induction (memory pre-population from stored backlog) -----------------
-
-    async def _pump_induct(bot_id: str, proc):
-        rec = app["inducts"][bot_id]
-        async for raw in proc.stdout:
-            line = raw.decode("utf-8", errors="replace").rstrip()
-            if line:
-                rec["lines"].append(line)
-                del rec["lines"][:-400]  # keep a bounded tail
-        await proc.wait()
-        rec["done"] = True
-        rec["returncode"] = proc.returncode
-
-    async def post_induct(request):
-        bot_id = bot_or_404(request)
-        body = await request.json()
-        server = str(body.get("server") or "").strip()
-        dry_run = bool(body.get("dry_run", True))
-        if not server.isdigit():
-            return json_response({"error": "server id required"}, status=400)
-        rec = app["inducts"].get(bot_id)
-        if rec and not rec["done"]:
-            return json_response({"error": "an induction is already running"},
-                                 status=409)
-        if pm.is_running(bot_id):
-            return json_response(
-                {"error": "stop the bot first - induction rebuilds its "
-                          "starting memory"}, status=409)
-        args = [sys.executable, str(root.bot_manager_script()),
-                "induct", bot_id, "--server", server]
-        if dry_run:
-            args.append("--dry-run")
-        if body.get("channels"):
-            args += ["--channels", ",".join(str(c) for c in body["channels"])]
-        proc = await asyncio.create_subprocess_exec(
-            *args, cwd=str(root.root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT)
-        app["inducts"][bot_id] = {
-            "proc": proc, "lines": [], "dry_run": dry_run, "done": False,
-            "returncode": None,
-            "started": datetime.now(timezone.utc).isoformat(),
-        }
-        asyncio.create_task(_pump_induct(bot_id, proc))
-        logger.info(f"Induction started for {bot_id} (server {server}, "
-                    f"dry_run={dry_run})")
-        return json_response({"started": True, "dry_run": dry_run}, status=202)
-
-    async def get_induct(request):
-        bot_id = bot_or_404(request)
-        rec = app["inducts"].get(bot_id)
-        if not rec:
-            return json_response({"running": False, "lines": []})
-        return json_response({
-            "running": not rec["done"],
-            "dry_run": rec["dry_run"],
-            "started": rec["started"],
-            "returncode": rec["returncode"],
-            "lines": rec["lines"],
-        })
-
     # --- daemon lifecycle -------------------------------------------------------
 
     async def post_shutdown(request):
@@ -689,7 +553,6 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
     app.router.add_get("/api/bots/{bot_id}/stream", get_stream)
     app.router.add_get("/api/bots/{bot_id}/logs", get_logs)
     app.router.add_get("/api/bots/{bot_id}/episodes", get_episodes)
-    app.router.add_get("/api/bots/{bot_id}/skills", get_skills)
     app.router.add_get("/api/bots/{bot_id}/config", get_config)
     app.router.add_put("/api/bots/{bot_id}/config", put_config)
     app.router.add_get("/api/bots/{bot_id}/memory/tree", get_memory_tree)
@@ -699,11 +562,8 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
     app.router.add_get("/api/bots/{bot_id}/repository/file", get_repo_file)
     app.router.add_get("/api/bots/{bot_id}/integrations", get_integrations)
     app.router.add_put("/api/bots/{bot_id}/integrations", put_integrations)
-    app.router.add_post("/api/bots/{bot_id}/skills", post_skill)
-    app.router.add_delete("/api/bots/{bot_id}/skills/{name}", delete_skill)
     app.router.add_post("/api/bots/{bot_id}/mcp/{name}/reconnect", reconnect_mcp)
     app.router.add_get("/api/setup", get_setup)
-    app.router.add_put("/api/setup/anthropic", put_anthropic_key)
     app.router.add_put("/api/bots/{bot_id}/token", put_bot_token)
     app.router.add_get("/api/bots/{bot_id}/guilds", get_guilds)
     app.router.add_get("/api/bots/{bot_id}/guilds/{guild_id}/channels",
@@ -712,8 +572,6 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
     app.router.add_delete("/api/bots/{bot_id}/repository/file", delete_repo_file)
     app.router.add_post("/api/bots/{bot_id}/repository/dir", post_repo_dir)
     app.router.add_post("/api/bots/{bot_id}/repository/move", post_repo_move)
-    app.router.add_post("/api/bots/{bot_id}/induct", post_induct)
-    app.router.add_get("/api/bots/{bot_id}/induct", get_induct)
     app.router.add_post("/api/supervisor/shutdown", post_shutdown)
 
     return app

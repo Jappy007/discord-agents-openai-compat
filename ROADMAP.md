@@ -34,32 +34,16 @@ judgment to handle that gracefully.
   decorum: knowing someone from another server is fair to acknowledge;
   their business stays where it was learned. Unified, not a gossip pipe.
 
-**Memory reconsolidation**
-- Memory currently only accretes; nothing merges, decays, or self-corrects.
-  A weekly background pass (Batches API, configurable
-  `api.consolidation_model`, Sonnet default) fixes that:
-  1. **Episode compaction** — old episodes merge into era digests
-  2. **Profile rewrites** — re-derived from evidence, contradictions resolve
-     toward recency, stale claims demoted, lean register enforced
-  3. **Provenance repair** — origin tags normalized
-  4. **Channel/culture refresh** — slower-cadence evidence-anchored rewrites
-- Every rewritten file's prior version is archived (`.history/`, pruned) —
-  one bad pass is always recoverable. Vault boundaries are absolute.
-
-**Substrate**
-- Message Batches API client: latency-tolerant distillation at 50% cost.
+**Memory reconsolidation** *(historical — removed with the OpenAI-only
+provider migration; no background compaction pass is currently offered)*
 
 ## 0.8.0 — Induction & new surfaces
 
 Make a bot joining a populated server instantly tuned-in instead of amnesiac,
 and present on every conversation surface.
 
-- **Server induction** — a deliberate operator action (`induct`, with
-  dry-run cost preview) that distills existing history into channel
-  digests, lean third-person user profiles, and server culture — explicitly
-  marked as *observations from reading the backlog, not lived memory*, so
-  the bot does its homework without faking familiarity. Built on the
-  reconsolidation machinery (induction is reconsolidation at t = 0).
+- **Server induction** *(historical — removed with the OpenAI-only provider
+  migration)*.
 - **Thread support** — threads become first-class conversation surfaces
   (backfill, replies, memory).
 - **Voice-channel text presence** — the bot lives in voice channels' text
@@ -131,9 +115,8 @@ v0.6.0 pre-release sweep, config freeze.
 - **Richer presence** — events, polls, scheduled activities
 - **Daily web-search quota** — dormant; revisit only if per-request caps
   prove insufficient
-- **The workshop: a real development sandbox** — the Anthropic code-execution
-  container is air-gapped (probed 2026-06-12: pip install times out, curl
-  fails, no ffmpeg binary; only the preinstalled scientific stack exists).
+- **The workshop: a real development sandbox** — the former provider-hosted
+  code-execution container has been removed with the OpenAI-only migration.
   That caps artifact work at what ships in the box. Two candidate paths for
   giving bots a real workspace, to be designed properly before building:
   1. **Local sandbox** — a Docker/WSL container on the host with network,
@@ -141,11 +124,9 @@ v0.6.0 pre-release sweep, config freeze.
      directory. Maximum capability; serious security surface (model-written
      code + network + operator's machine) — needs egress policy, resource
      caps, and a kill switch designed first.
-  2. **Managed Agents session** (Anthropic-hosted, beta) — the bot spawns a
-     cloud session whose environment allows package managers
-     (`networking.limited` + `allow_package_managers`), mounts repo files,
-     and returns outputs via the Files API. No local attack surface, real
-     pip; adds per-session cost, latency, and a beta dependency.
+  2. **Provider-hosted sandbox** — a managed code-execution session from the
+     model provider. No local attack surface; adds per-session cost, latency,
+     and a provider-specific dependency.
   Pairs naturally with long-work concurrency below — workshop jobs are
   exactly the long work the chat path must survive. Design both together.
 - **Long-work concurrency** — when a turn enters long tool work (skill

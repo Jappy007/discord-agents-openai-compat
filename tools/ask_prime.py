@@ -72,9 +72,9 @@ JUDGMENT_SCHEMA = {
 class AskPrimeExecutor:
     """Executes ask_prime calls; constructed in on_ready (needs the client)."""
 
-    def __init__(self, anthropic, model: str, vault_ids, watch_manager,
+    def __init__(self, llm, model: str, vault_ids, watch_manager,
                  agentic_engine, discord_client, message_memory=None):
-        self.anthropic = anthropic
+        self.llm = llm
         self.model = model
         self.vaults = {str(v) for v in (vault_ids or [])}
         self.watch_manager = watch_manager
@@ -162,7 +162,7 @@ class AskPrimeExecutor:
         origin_guild = self.discord_client.get_guild(int(current_server_id))
         origin_name = origin_guild.name if origin_guild else "another server"
         try:
-            response = await self.anthropic.beta.messages.create(
+            response = await self.llm.beta.messages.create(
                 model=self.model,
                 max_tokens=600,
                 system=PRIME_JUDGMENT_PROMPT.format(

@@ -21,24 +21,20 @@ if TYPE_CHECKING:
     from .config import BotConfig
     from .message_memory import MessageMemory
     from .memory_manager import MemoryManager
-    from anthropic import AsyncAnthropic
 
 from .proactive_action import ProactiveAction
 from .engagement_tracker import EngagementTracker
 from .vaults import VaultEnforcer
 from .llm_providers.factory import utility_model
 from .internal_constants import (
-    AGENTIC_EFFORT,
     FOLLOWUP_STANDALONE_IDLE_MINUTES,
     PROACTIVE_INCLUDES_THREADS,
     PROACTIVE_SETTLE_DELAY_MINUTES,
     WATCH_EVAL_MAX_TOKENS,
-    WATCH_EVAL_MODEL,
     WATCH_EVAL_PROMPT,
     WATCH_EVAL_SCHEMA,
     WATCH_EXPIRED_NOTE,
     WATCH_RELAY_NOTE,
-    model_supports_effort,
 )
 from .memory_tool_executor import MemoryToolExecutor
 
@@ -55,7 +51,7 @@ def is_proactive_surface(channel) -> bool:
 
 def _parse_aware_utc(value: str) -> datetime:
     """
-    Claude writes follow-up timestamps via the memory tool, so naive ISO
+    The model writes follow-up timestamps via the memory tool, so naive ISO
     strings are common - treat them as UTC instead of raising TypeError on
     comparison (one naive timestamp bricked every agentic iteration).
     """
@@ -107,7 +103,7 @@ class AgenticEngine:
         config: "BotConfig",
         memory_manager: "MemoryManager",
         message_memory: "MessageMemory",
-        anthropic_client: "AsyncAnthropic",
+        llm_client,
     ):
         """
         Initialize agentic engine.
@@ -116,14 +112,12 @@ class AgenticEngine:
             config: Bot configuration
             memory_manager: Memory tool manager
             message_memory: Message storage
-            anthropic_client: Anthropic API client
+            llm_client: LLM client
         """
         self.config = config
         self.memory = memory_manager
         self.message_memory = message_memory
-        self.anthropic = anthropic_client
-        from .llm_providers.factory import is_anthropic_native
-        self._llm_is_anthropic_native = is_anthropic_native()
+        self.llm = llm_client
         self.discord_client = None  # Set after Discord client initialization
 
         # Memory tool executor for the proactive tool loop (MemoryManager has
@@ -139,10 +133,6 @@ class AgenticEngine:
 
         # Cache proactive config (v0.6.0 - simplified config with presets)
         self._proactive_config = config.get_proactive_config()
-
-        # Consolidator (attached externally by bot_manager after construction)
-        self.consolidator = None
-        self._consolidation_task = None
 
         # Prime coordination (v0.9): approved ask_prime sends, drained
         # immediately and again each loop tick (quiet hours defer them).
@@ -180,20 +170,11 @@ class AgenticEngine:
         logger.info("Discord client reference set on AgenticEngine")
 
     def _build_output_config(self, schema: dict) -> dict:
-        """Structured output config; effort only where the model accepts it."""
-        output_config = {"format": {"type": "json_schema", "schema": schema}}
-        if model_supports_effort(self.config.api.model):
-            output_config["effort"] = AGENTIC_EFFORT
-        return output_config
+        """Structured output config."""
+        return {"format": {"type": "json_schema", "schema": schema}}
 
     def _memory_only_tools(self) -> list:
-        """The proactive-message tool list is just the memory tool. Anthropic
-        native uses its server type; LLM_PROVIDER=openai_compatible declares
-        the same tool as an explicit function schema (dispatch below already
-        routes purely on `content_block.input`/name, so no other change is
-        needed)."""
-        if self._llm_is_anthropic_native:
-            return [{"type": "memory_20250818", "name": "memory"}]
+        """The proactive-message tool list is just the memory tool."""
         from .memory_tool_executor import MEMORY_TOOL_SCHEMA
         return [MEMORY_TOOL_SCHEMA]
 
@@ -254,14 +235,6 @@ class AgenticEngine:
                 current_hour = datetime.now().hour
                 if current_hour == 3:  # 3am maintenance
                     await self.maintain_memories()
-                    # Weekly memory reconsolidation: batch-based, hours-long -
-                    # runs as a background task so the loop keeps ticking.
-                    # Stamp files make double-fires harmless.
-                    if self.consolidator and (
-                            self._consolidation_task is None
-                            or self._consolidation_task.done()):
-                        self._consolidation_task = asyncio.create_task(
-                            self.consolidator.nightly_tick())
 
                 logger.debug("Agentic loop iteration complete")
 
@@ -313,7 +286,7 @@ class AgenticEngine:
                 channel_id=followup["channel_id"],
                 user_id=followup["user_id"],
                 user_name=followup["user_name"],
-                message=None,  # Will be generated by Claude
+                message=None,  # Will be generated by the model
                 context=followup["context"],
                 delivery_method=await self.decide_followup_delivery(followup),
                 followup_id=followup.get("id"),  # Track ID for completion
@@ -405,7 +378,7 @@ class AgenticEngine:
                 priority="low",
                 server_id=server_id,
                 channel_id=channel_id,
-                message=None,  # Will be generated by Claude
+                message=None,  # Will be generated by the model
                 context="Proactive engagement opportunity",
                 delivery_method="standalone",
             )
@@ -639,7 +612,7 @@ class AgenticEngine:
                 logger.warning(f"Channel {action.channel_id} not found")
                 return
 
-            # Generate follow-up message using Claude
+            # Generate follow-up message using the model
             message = await self._generate_followup_message(action)
 
             # Split message if it exceeds Discord's limit
@@ -681,7 +654,7 @@ class AgenticEngine:
 
     async def _generate_followup_message(self, action: ProactiveAction) -> str:
         """
-        Generate a natural follow-up message using Claude.
+        Generate a natural follow-up message using the model.
 
         Args:
             action: Follow-up action with context
@@ -696,7 +669,7 @@ class AgenticEngine:
             else "You are a helpful Discord bot assistant."
         )
 
-        # Build prompt for Claude
+        # Build prompt for the model
         prompt = f"""You are following up on an event that was mentioned earlier.
 
 Event: {action.followup_event}
@@ -709,7 +682,7 @@ Your personality:
 {base_prompt}"""
 
         try:
-            response = await self.anthropic.messages.create(
+            response = await self.llm.messages.create(
                 model=self.config.api.model,
                 max_tokens=500,
                 messages=[{"role": "user", "content": prompt}],
@@ -867,38 +840,27 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
                 "If nothing genuinely invites a fresh message, set should_send to false instead of forcing one."
             )
 
-            # Build API params with extended thinking and memory tool
+            # Build API params with the memory tool
             api_params = {
                 "model": self.config.api.model,
-                "max_tokens": 2000,  # thinking counts against this; truncation aborts the send
+                "max_tokens": 2000,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": "\n".join(user_parts)}],
                 "tools": self._memory_only_tools(),
                 "output_config": self._build_output_config(PROACTIVE_MESSAGE_SCHEMA),
             }
 
-            # Add adaptive thinking if configured
-            if self.config.api.thinking.enabled:
-                api_params["thinking"] = {"type": "adaptive"}
-
-            # Call Claude to generate message
             logger.info(f"Generating proactive message for channel {action.channel_id}")
 
             # Handle tool use loop
             response_text = ""
-            thinking_text = ""
             loop_iteration = 0
             max_loop_iterations = 5
 
             while True:
                 loop_iteration += 1
 
-                response = await self.anthropic.messages.create(**api_params)
-
-                # Extract thinking
-                for block in response.content:
-                    if block.type == "thinking":
-                        thinking_text += block.thinking
+                response = await self.llm.messages.create(**api_params)
 
                 if response.stop_reason == "tool_use" and loop_iteration < max_loop_iterations:
                     # Execute tool calls
@@ -951,7 +913,7 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
                     await self.message_memory.add_event(
                         "proactive", action.server_id, action.channel_id,
                         {
-                            "triggers": [], "thinking": thinking_text,
+                            "triggers": [], "thinking": "",
                             "tool_calls": [], "response": None,
                             "decision": "no opening taken",
                         },
@@ -983,7 +945,7 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
                 await self.message_memory.add_event(
                     "proactive", action.server_id, action.channel_id,
                     {
-                        "triggers": [], "thinking": thinking_text,
+                        "triggers": [], "thinking": "",
                         "tool_calls": [], "response": generated_message,
                     },
                 )
@@ -1025,8 +987,8 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
                     for m in human
                 )
                 try:
-                    response = await self.anthropic.messages.create(
-                        model=utility_model(WATCH_EVAL_MODEL),
+                    response = await self.llm.messages.create(
+                        model=utility_model(self.config.api.model),
                         max_tokens=WATCH_EVAL_MAX_TOKENS,
                         system=WATCH_EVAL_PROMPT.format(question=watch["question"]),
                         messages=[{"role": "user", "content": transcript}],
@@ -1218,7 +1180,7 @@ this room talks - brief, natural, and honest about where it comes from."""
                 "output_config": self._build_output_config(FOLLOWUP_MESSAGE_SCHEMA),
             }
 
-            response = await self.anthropic.messages.create(**api_params)
+            response = await self.llm.messages.create(**api_params)
             response_text = "".join(b.text for b in response.content if b.type == "text")
             if not response_text.strip():
                 logger.warning("Coordination generation produced no text; skipping send")
@@ -1347,7 +1309,7 @@ this room talks - brief, natural, and honest about where it comes from."""
             except Exception:
                 current_status = None
 
-            # Use Claude to generate a funny/shareable status
+            # Use the model to generate a funny/shareable status
             base_prompt = (
                 self.config.personality.base_prompt
                 if self.config.personality
@@ -1365,7 +1327,7 @@ Current status: {current_status or "(none)"}
 
 Return ONLY the new status text, nothing else."""
 
-            response = await self.anthropic.messages.create(
+            response = await self.llm.messages.create(
                 model=self.config.api.model,
                 max_tokens=150,
                 messages=[{"role": "user", "content": prompt}],
@@ -1466,13 +1428,6 @@ Return ONLY the new status text, nothing else."""
             self._task.cancel()
             try:
                 await self._task
-            except asyncio.CancelledError:
-                pass
-
-        if self._consolidation_task and not self._consolidation_task.done():
-            self._consolidation_task.cancel()
-            try:
-                await self._consolidation_task
             except asyncio.CancelledError:
                 pass
 

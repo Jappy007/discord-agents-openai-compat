@@ -36,22 +36,7 @@
 
 </div>
 
-<dialog id="dlg-key">
-  <h2>Claude API key</h2>
-  <p>The bots think with Claude. Paste an API key from
-     <b>console.anthropic.com</b> → API keys. It's validated against the
-     API, stored locally in this install's <code>.env</code>, and never
-     shown back.</p>
-  <form method="dialog" novalidate>
-    <label for="key-in">API key</label>
-    <input type="password" id="key-in" placeholder="sk-ant-…" autocomplete="off">
-    <div class="field-error" id="key-err"></div>
-    <div class="actions">
-      <button type="button" class="btn quiet" onclick="this.closest('dialog').close()">Later</button>
-      <button type="submit" class="btn primary">Validate &amp; save</button>
-    </div>
-  </form>
-</dialog>
+
 
 <dialog id="dlg-create">
   <h2>A new bot</h2>

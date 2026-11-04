@@ -20,17 +20,12 @@ EPISODE_MIN_MESSAGES = 3            # Segments smaller than this merge forward
 EPISODE_BOOTSTRAP_DAYS = 2          # On first run, skip history older than this
 EPISODE_SEED_TAIL_MESSAGES = 10     # Discord messages kept when a session reseeds
 EPISODE_INDEX_SEED_TAIL = 10        # Episode-index lines inlined into the seed
-EPISODE_DISTILL_MODEL = "claude-haiku-4-5"
 EPISODE_DISTILL_MAX_TOKENS = 4000
 EPISODE_RETRY_COOLDOWN_MINUTES = 10  # Backoff after a failed distillation
 
 TOOL_STUB_KEEP_TURNS = 3            # Turns whose tool results stay full
 TOOL_STUB_MIN_CHARS = 500           # Results shorter than this are never stubbed
 TOOL_STUB_TEXT = "[tool result cleared at turn boundary - re-run the tool if the information is needed again]"
-
-# Per-engine effort (v0.6.0 Phase 5): background one-liners don't need the
-# chat engine's effort level; api.effort in config only steers the chat brain
-AGENTIC_EFFORT = "low"
 
 # Minutes to wait after a proactive/follow-up send before judging whether
 # anyone engaged with it (success side of the engagement stats)
@@ -39,36 +34,14 @@ PROACTIVE_SETTLE_DELAY_MINUTES = 15
 # Channel quiet this long -> a standalone follow-up won't interrupt anything
 FOLLOWUP_STANDALONE_IDLE_MINUTES = 10
 
-# Models that accept output_config.effort; passing it elsewhere is a 400
-_EFFORT_CAPABLE_MARKERS = ("fable", "opus-4-5", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6", "sonnet-5")
-
-
-def model_supports_effort(model: str) -> bool:
-    return any(marker in model for marker in _EFFORT_CAPABLE_MARKERS)
-
-
-# Per-model OUTPUT-token ceilings (distinct from the 1M *input* context window).
-# max_tokens is derived as min(context_tokens, this) and never shown to users.
-# Chat requests stream, so the SDK's 10-minute non-streaming guard doesn't cap this.
-# Conservative safe floors - the API 400s if max_tokens exceeds the real cap, so
-# these bias low (responses rarely approach them); raise if Anthropic docs confirm
-# higher per model. Substring match, longest/most-specific markers first.
-_MODEL_MAX_OUTPUT = (
-    ("fable", 32000),
-    ("opus-4-8", 32000),
-    ("opus", 32000),
-    ("sonnet-4-6", 32000),
-    ("sonnet", 32000),
-    ("haiku", 16000),
-)
+# Per-model OUTPUT-token ceiling. max_tokens is derived as
+# min(context_tokens, this). OpenAI-compatible endpoints differ widely, so this
+# is a conservative default; OPENAI_MAX_OUTPUT_TOKENS can cap it further.
 MODEL_MAX_OUTPUT_DEFAULT = 16000
 
 
 def model_max_output(model: str) -> int:
-    """The output-token ceiling for a model (safe floor; see _MODEL_MAX_OUTPUT)."""
-    for marker, cap in _MODEL_MAX_OUTPUT:
-        if marker in (model or ""):
-            return cap
+    """The output-token ceiling for a model."""
     return MODEL_MAX_OUTPUT_DEFAULT
 
 
@@ -80,22 +53,9 @@ IGNORE_THRESHOLD = 5  # Consecutive ignores before silence
 
 
 # =============================================================================
-# SKILLS (Internal)
-# =============================================================================
-SKILLS_CACHE_FILE = ".skills_cache.json"
-
-
-# =============================================================================
 # MCP (Internal)
 # =============================================================================
 MCP_CONFIG_FILE = "mcp_servers.json"
-
-
-# =============================================================================
-# WEB SEARCH (Internal)
-# =============================================================================
-WEB_SEARCH_CITATIONS_ENABLED = True  # Required for end-user applications
-WEB_SEARCH_MAX_USES = 8  # Per-request cap on search/fetch calls (cost guard)
 
 
 # =============================================================================
@@ -130,7 +90,6 @@ PRIME_ASKS_PER_CHANNEL_PER_DAY = 5
 PRIME_ASKS_PER_SERVER_PER_DAY = 12
 PRIME_MAX_CONCURRENT_WATCHES = 10
 PRIME_WATCH_EXPIRY_HOURS = 24
-WATCH_EVAL_MODEL = "claude-haiku-4-5"
 WATCH_EVAL_MAX_TOKENS = 300
 
 # Watch evaluation + relay notes. The eval is one cheap structured call;
@@ -199,56 +158,6 @@ PRIME_CONTEXT_TEMPLATE = (
     "from those places informs you; what's said here stays here.\n"
     "</prime_context>"
 )
-
-
-# =============================================================================
-# SERVER INDUCTION (v0.8.0, Internal)
-# =============================================================================
-# Input target per distillation call (chars/4). Kept small so a dense chunk's
-# digest stays well under the CONSOLIDATION_MAX_TOKENS output cap rather than
-# truncating into invalid JSON. Very dense channels (short, rapid messages) still
-# overflowed at 25k, so this pairs a small chunk with a raised output cap below.
-INDUCTION_CHUNK_TOKENS = 12_000
-INDUCTION_OUTPUT_RATIO = 0.05      # output-token estimate as fraction of input
-
-# Batch-rate $/MTok (50% of live) for the dry-run cost table; unknown models
-# print "n/a" rather than a guess. Substring match - specific keys FIRST
-# (opus-4-5+ repriced below the opus-4.0/4.1 tier).
-MODEL_BATCH_PRICES = {
-    "fable": (5.00, 25.00),
-    "haiku-4-5": (0.50, 2.50),
-    "sonnet-4-5": (1.50, 7.50),
-    "sonnet-4-6": (1.50, 7.50),
-    "sonnet-5": (1.50, 7.50),
-    "opus-4-5": (2.50, 12.50),
-    "opus-4-6": (2.50, 12.50),
-    "opus-4-7": (2.50, 12.50),
-    "opus-4-8": (2.50, 12.50),
-    "opus-4": (7.50, 37.50),
-}
-
-
-def model_live_prices(model: str):
-    """Live $/MTok (input, output) for a model, or None when unknown.
-    Cache reads bill at 0.1x input."""
-    for marker, (batch_in, batch_out) in MODEL_BATCH_PRICES.items():
-        if marker in model:
-            return (batch_in * 2, batch_out * 2)
-    return None
-
-
-def estimate_cost_usd(tokens: dict, model: str):
-    """Dollar estimate for a {uncached_in, cache_read, cache_write, out} token
-    bundle. Cache reads bill at 0.1x input, 5-minute cache writes at 1.25x.
-    None when the model's prices aren't known - honesty over a guess."""
-    prices = model_live_prices(model or "")
-    if not prices:
-        return None
-    p_in, p_out = prices
-    return ((tokens.get("uncached_in", 0) or 0) * p_in
-            + (tokens.get("cache_read", 0) or 0) * p_in * 0.1
-            + (tokens.get("cache_write", 0) or 0) * p_in * 1.25
-            + (tokens.get("out", 0) or 0) * p_out) / 1_000_000
 
 
 def format_size(size_bytes: int) -> str:
@@ -420,16 +329,3 @@ WEB_SEARCH_DISABLED_PROMPT = """
 You cannot search the web. Work from your training knowledge and be clear about uncertainty.
 """
 
-
-# =============================================================================
-# MEMORY RECONSOLIDATION (v0.7.0, Internal)
-# =============================================================================
-CONSOLIDATION_INTERVAL_DAYS = 7        # weekly per-server pass
-CONSOLIDATION_CULTURE_EVERY_N_RUNS = 4 # channel/culture refresh cadence (monthly)
-CONSOLIDATION_ERA_AGE_DAYS = 30        # episodes older than this compact into era digests
-CONSOLIDATION_HISTORY_KEEP = 3         # .history versions kept per filename
-CONSOLIDATION_BATCH_POLL_SECONDS = 60
-CONSOLIDATION_BATCH_TIMEOUT_HOURS = 12
-CONSOLIDATION_EVIDENCE_MESSAGES = 80   # message sample per user for profile rewrites
-CONSOLIDATION_EVIDENCE_EPISODES = 3    # recent episode files folded into profile evidence
-CONSOLIDATION_MAX_TOKENS = 12000  # output cap; headroom so dense induction chunks don't truncate

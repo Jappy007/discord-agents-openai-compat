@@ -1,7 +1,7 @@
 """
 Memory Tool Executor - Client-Side Implementation
 
-Implements Anthropic's Memory Tool API specification.
+Implements the memory tool API specification.
 Reference: docs/api_memory_tool.md
 
 Operations: view, create, str_replace, insert, delete, rename
@@ -17,12 +17,8 @@ from .vaults import VaultEnforcer
 logger = logging.getLogger(__name__)
 
 
-# Explicit JSON schema for LLM_PROVIDER=openai_compatible, where the memory
-# tool is declared as a normal function tool rather than Anthropic's native
-# memory_20250818 server type (which carries no input_schema of its own,
-# since Anthropic defines it server-side). Dispatch is unchanged either way -
-# reactive_engine/agentic_engine route on `block.name == "memory"` regardless
-# of which tool declaration produced the tool_use block.
+# Explicit JSON schema for the memory tool, declared as a normal function
+# tool. reactive_engine/agentic_engine dispatch on `block.name == "memory"`.
 MEMORY_TOOL_SCHEMA = {
     "name": "memory",
     "description": (
@@ -62,7 +58,7 @@ class MemoryToolExecutor:
     """
     Executes memory tool commands on local filesystem.
 
-    Follows Anthropic's Memory Tool API spec.
+    Follows the memory tool API spec.
     All paths must start with /memories/{bot_id}/
     """
 
@@ -87,7 +83,7 @@ class MemoryToolExecutor:
         write_grant: Optional[str] = None
     ) -> str:
         """
-        Execute memory tool command, returning result string for Claude.
+        Execute memory tool command, returning result string for the model.
 
         Args:
             tool_input: Tool parameters (command, path, etc.)

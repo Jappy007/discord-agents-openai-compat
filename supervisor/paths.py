@@ -70,9 +70,6 @@ class SupervisorRoot:
         suffix = "_conversations.log" if which == "conversations" else ".log"
         return self.logs_dir() / f"{bot_id}{suffix}"
 
-    def skills_dir(self) -> Path:
-        return self.code_root / "skills"
-
     def bot_manager_script(self) -> Path:
         return self.code_root / "bot_manager.py"
 

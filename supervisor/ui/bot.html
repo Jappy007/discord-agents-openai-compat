@@ -68,16 +68,6 @@
   <section class="tabpanel" id="tab-integrations">
     <div class="int-sec">
       <div class="sechead">
-        <h3>Skills</h3>
-        <span class="count" id="skills-count"></span>
-        <span class="spacer"></span>
-        <button class="addbtn" id="skill-add">+ Add skill</button>
-      </div>
-      <div id="skills-list"></div>
-    </div>
-
-    <div class="int-sec">
-      <div class="sechead">
         <h3>MCP Servers</h3>
         <span class="count" id="mcp-count"></span>
         <span class="spacer"></span>
@@ -106,22 +96,6 @@
   </footer>
 
 </div>
-
-<dialog id="dlg-skill">
-  <h2>Add a skill</h2>
-  <p>Pick a skill from your computer — a folder containing <b>SKILL.md</b>,
-     or a <b>.zip</b> of one. It's copied into this bot's skills and loaded
-     on the next start.</p>
-  <form method="dialog" novalidate>
-    <label for="skill-file">Skill file or folder</label>
-    <input type="file" id="skill-file" accept=".zip,.skill">
-    <div class="field-error" id="skill-err"></div>
-    <div class="actions">
-      <button type="button" class="btn quiet" onclick="this.closest('dialog').close()">Cancel</button>
-      <button type="submit" class="btn primary">Add skill</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="dlg-memfile">
   <h2>New memory file</h2>

@@ -107,7 +107,7 @@ Provide as much detail as possible:
 
 **Essential practices:**
 - Update dependencies regularly: `pip install --upgrade -r requirements.txt`
-- Monitor security advisories for `discord.py` and `anthropic` SDK
+- Monitor security advisories for `discord.py` and the `openai` SDK
 - Pin versions in production: `pip freeze > requirements.txt`
 
 **Common mistakes to avoid:**

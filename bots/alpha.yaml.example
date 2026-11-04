@@ -9,8 +9,8 @@
 # BOT IDENTITY
 # ============================================================
 bot_id: alpha
-name: "Claude (Alpha)"
-description: "Helpful, thoughtful Discord bot powered by Claude"
+name: "Alpha"
+description: "Helpful, thoughtful Discord bot"
 
 # ============================================================
 # DISCORD CONNECTION
@@ -93,26 +93,16 @@ agentic:
 # AI MODEL
 # ============================================================
 api:
-  model: "claude-sonnet-5"
+  # Model name for your OpenAI-compatible endpoint. Leave empty to use
+  # OPENAI_MODEL from .env.
+  model: ""
   max_tokens: 16000
 
   # Context management
   context_messages: 30        # Messages to remember (rolling window)
   context_tokens: 80000       # Session token threshold: episodize + reseed past this (from response.usage)
 
-  # Effort - main cost/depth dial: low | medium | high | max
-  # Omit for API default (high). Chat bots usually want low/medium.
-  effort: "medium"
-
-  # Weekly memory reconsolidation model (Batches API, 50% token cost).
-  # Sonnet default; Haiku = cheap, Opus/Fable = premium.
-  consolidation_model: "claude-sonnet-5"
-
-  # Adaptive thinking - model decides when and how much to think
-  thinking:
-    enabled: true
-
-  # Web Search - all or nothing (no rate limiting)
+  # Web Search - client-side tools, all or nothing (no rate limiting)
   web_search:
     enabled: true
 
@@ -123,12 +113,6 @@ api:
 # MCP (Model Context Protocol) - external data sources
 mcp:
   enabled: false
-
-# Skills - modular instruction packages (always enabled)
-# Code execution is automatically enabled with skills
-skills:
-  include_anthropic_skills: true  # xlsx, pptx, docx, pdf
-  default_skills: ["pdf"]         # Loaded initially; the bot can swap via request_skill
 
 # Unified attachment system (images, documents, spreadsheets, code files)
 attachments:

@@ -12,9 +12,8 @@ def get_repository_tool() -> dict:
         "description": (
             "Your private file space for this server - a local folder that persists across "
             "restarts. People can drop files in for you, and you can keep whatever you decide "
-            "is worth keeping, for whatever reason: something you wrote (save_file), an "
-            "attachment from the chat (save_attachment), or a file you produced via code "
-            "execution (save_output with its file_id). Arrange or prune it however you like "
+            "is worth keeping, for whatever reason: something you wrote (save_file) or an "
+            "attachment from the chat (save_attachment). Arrange or prune it however you like "
             "(rename, delete, nested folders). It's entirely yours and needs no upkeep - reach "
             "for it when something genuinely seems worth keeping or someone asks, and otherwise "
             "ignore it. To READ one of its files, use discord_tools get_attachment with the "
@@ -25,24 +24,20 @@ def get_repository_tool() -> dict:
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "save_file", "save_attachment", "save_output", "delete", "rename"],
+                    "enum": ["list", "save_file", "save_attachment", "delete", "rename"],
                     "description": "Repository action to execute",
                 },
                 "path": {
                     "type": "string",
-                    "description": "[save_file/save_attachment/save_output/delete] Relative path inside the repository, e.g. 'notes/summary.md'. Optional for the save_* copy actions (defaults to the source filename).",
+                    "description": "[save_file/save_attachment/delete] Relative path inside the repository, e.g. 'notes/summary.md'. Optional for save_attachment (defaults to the source filename).",
                 },
                 "content": {
                     "type": "string",
-                    "description": "[save_file] Full text content to write (UTF-8). For binary files use save_output via code execution instead.",
+                    "description": "[save_file] Full text content to write (UTF-8).",
                 },
                 "attachment_id": {
                     "type": "string",
                     "description": "[save_attachment] ID of an existing Discord attachment to copy into the repository",
-                },
-                "file_id": {
-                    "type": "string",
-                    "description": "[save_output] Files API id (looks like 'file_...') of a code-execution output, shown in the code execution result. NOT a container path. If this turn produced exactly one output file you can omit it.",
                 },
                 "old_path": {
                     "type": "string",

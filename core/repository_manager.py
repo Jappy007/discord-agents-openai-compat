@@ -4,9 +4,9 @@ Repository Manager - the bot's persistent per-server file drive (v0.6.1).
 A plain local folder (repository/{bot_id}/{server_id}/) the user edits by hand
 and the bot manages through explicit `repository` tool actions. Files ride the
 existing attachments table (sentinel channel_id='repository') so retrieval
-reuses the attachment pipeline - classification, lazy Files API upload, image
-cache, stale-file recovery - unchanged. Disk is the source of truth: scan()
-reconciles before every manifest render and tool action.
+reuses the attachment pipeline - classification and image cache -
+unchanged. Disk is the source of truth: scan() reconciles before every
+manifest render and tool action.
 """
 
 import os
@@ -43,10 +43,6 @@ class RepositoryManager:
     @property
     def db(self):
         return self.attachment_manager.attachment_db.db
-
-    @property
-    def files_api(self):
-        return self.attachment_manager.files_api_client
 
     def server_root(self, server_id: str) -> Path:
         path = self.root / server_id
@@ -94,7 +90,7 @@ class RepositoryManager:
                 on_disk[str(full.resolve())] = (stat.st_size, stat.st_mtime)
 
         async with self.db.execute(
-            "SELECT attachment_id, local_path, size_bytes, disk_mtime, file_id "
+            "SELECT attachment_id, local_path, size_bytes, disk_mtime "
             "FROM attachments WHERE channel_id = ? AND server_id = ?",
             (self.SENTINEL, server_id),
         ) as cursor:
@@ -104,12 +100,12 @@ class RepositoryManager:
         for row in rows:
             key = str(Path(row["local_path"]).resolve())
             if key not in on_disk:
-                await self._deregister(row["attachment_id"], row["file_id"])
+                await self._deregister(row["attachment_id"])
                 continue
             known.add(key)
             size, mtime = on_disk[key]
             if size != row["size_bytes"] or mtime != (row["disk_mtime"] or 0):
-                await self._mark_changed(row["attachment_id"], row["file_id"], size, mtime)
+                await self._mark_changed(row["attachment_id"], size, mtime)
 
         for key, (size, mtime) in on_disk.items():
             if key not in known:
@@ -125,9 +121,9 @@ class RepositoryManager:
             INSERT INTO attachments (
                 attachment_id, message_id, server_id, channel_id,
                 filename, size_bytes, content_type, attachment_type,
-                discord_url, local_path, file_id,
+                discord_url, local_path,
                 processed_base64, processed_mime, disk_mtime
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?)
             """,
             (
                 attachment_id, self.SENTINEL, server_id, self.SENTINEL,
@@ -140,31 +136,21 @@ class RepositoryManager:
         logger.info(f"Repository file registered: {self._relpath(server_id, full_path)} ({attachment_id})")
         return attachment_id
 
-    async def _mark_changed(self, attachment_id: str, file_id: Optional[str],
+    async def _mark_changed(self, attachment_id: str,
                             size: int, mtime: float) -> None:
-        await self._delete_files_api_copy(file_id)
         await self.db.execute(
-            "UPDATE attachments SET size_bytes = ?, disk_mtime = ?, file_id = NULL, "
-            "processed_base64 = NULL, processed_mime = NULL, file_api_uploaded_at = NULL "
+            "UPDATE attachments SET size_bytes = ?, disk_mtime = ?, "
+            "processed_base64 = NULL, processed_mime = NULL "
             "WHERE attachment_id = ?",
             (size, mtime, attachment_id),
         )
         logger.info(f"Repository file changed on disk, caches invalidated: {attachment_id}")
 
-    async def _deregister(self, attachment_id: str, file_id: Optional[str]) -> None:
-        await self._delete_files_api_copy(file_id)
+    async def _deregister(self, attachment_id: str) -> None:
         await self.db.execute(
             "DELETE FROM attachments WHERE attachment_id = ?", (attachment_id,)
         )
         logger.info(f"Repository file deregistered: {attachment_id}")
-
-    async def _delete_files_api_copy(self, file_id: Optional[str]) -> None:
-        if not file_id:
-            return
-        try:
-            await self.files_api.delete(file_id)
-        except Exception as e:
-            logger.warning(f"Could not delete stale Files API copy {file_id}: {e}")
 
     # ========== MANIFEST ==========
 
@@ -218,17 +204,14 @@ class RepositoryManager:
     # ========== TOOL ACTIONS ==========
 
     async def execute(self, tool_input: dict, current_server_id: str,
-                      current_channel_id: str = None,
-                      container_file_ids: Optional[list] = None) -> str:
+                      current_channel_id: str = None) -> str:
         """
         Execute a repository tool action. Always returns a string for the
         tool_result; never raises. Scans first so views match the disk.
-        container_file_ids: Files API ids of this turn's code-exec outputs,
-        used to resolve save_output when the model passes a container path.
         """
         action = tool_input.get("action", "")
         try:
-            if (self.vaults and action in ("save_file", "save_attachment", "save_output")
+            if (self.vaults and action in ("save_file", "save_attachment")
                     and self.vaults.blocks_repository_save(current_server_id, current_channel_id)):
                 return ("Error: This channel is vaulted - what happens here stays here, "
                         "and the repository is visible to the whole server.")
@@ -243,8 +226,6 @@ class RepositoryManager:
                 return await self._save_file(current_server_id, tool_input)
             elif action == "save_attachment":
                 return await self._save_attachment(current_server_id, tool_input, current_channel_id)
-            elif action == "save_output":
-                return await self._save_output(current_server_id, tool_input, container_file_ids)
             elif action == "delete":
                 return await self._delete(current_server_id, tool_input)
             elif action == "rename":
@@ -396,43 +377,6 @@ class RepositoryManager:
         return (f"Copied {row['filename']} into your repository as {rel} "
                 f"({format_size(len(data))}). Attachment ID: {new_row['attachment_id']}")
 
-    async def _save_output(self, server_id: str, tool_input: dict,
-                           container_file_ids: Optional[list] = None) -> str:
-        file_id = tool_input.get("file_id", "")
-        candidates = list(dict.fromkeys(container_file_ids or []))
-
-        # The model often passes the container path ('/tmp/chart.png') instead
-        # of the Files API id - resolve unambiguously from this turn's outputs
-        if not file_id.startswith("file_"):
-            if len(candidates) == 1:
-                file_id = candidates[0]
-            else:
-                hint = (f" This turn's output file ids: {', '.join(candidates)}."
-                        if candidates else
-                        " No code-execution outputs were produced this turn.")
-                return (f"Error: save_output needs the Files API id of a code-execution "
-                        f"output (looks like 'file_...'), got {file_id!r}.{hint}")
-
-        meta = await self.files_api.retrieve(file_id)
-        data = await self.files_api.content(file_id)
-        if not data:
-            hint = f" This turn's output file ids: {', '.join(candidates)}." if candidates else ""
-            return (f"Error: Could not download {file_id}. Only files created by "
-                    f"code execution or skills are downloadable from the Files API.{hint}")
-
-        default_name = (meta or {}).get("filename") or f"{file_id}.bin"
-        rel_path = tool_input.get("path") or Path(default_name).name
-        full = self._resolve(server_id, rel_path)
-        full.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(full, "wb") as f:
-            await f.write(data)
-
-        await self.scan(server_id)
-        new_row = await self._row_for_path(server_id, full)
-        rel = self._relpath(server_id, str(full))
-        return (f"Saved container output to your repository as {rel} "
-                f"({format_size(len(data))}). Attachment ID: {new_row['attachment_id']}")
-
     async def _delete(self, server_id: str, tool_input: dict) -> str:
         rel_path = tool_input.get("path", "")
         if not rel_path:
@@ -445,7 +389,7 @@ class RepositoryManager:
         row = await self._row_for_path(server_id, full)
         full.unlink()
         if row:
-            await self._deregister(row["attachment_id"], row["file_id"])
+            await self._deregister(row["attachment_id"])
             await self.db.commit()
         rel = self._relpath(server_id, str(full))
         return f"Deleted {rel} from your repository."

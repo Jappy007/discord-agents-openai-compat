@@ -7,7 +7,7 @@ exactly what went out - message id, attached files - so the model always
 has ground truth about its own I/O.
 
 Execution lives in ReactiveEngine._execute_send_message (it needs the
-channel, the turn's container outputs, and the Files API client).
+channel and the local attachment store).
 """
 
 SEND_MESSAGE_TOOL = {
@@ -50,9 +50,9 @@ SEND_MESSAGE_TOOL = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Filenames of files created via code execution during "
-                    "THIS turn to attach (e.g. [\"chart.png\"]). Files from "
-                    "previous turns no longer exist - regenerate them."
+                    "Filenames of files you created this turn to attach "
+                    "(e.g. [\"deck.pptx\"]). Use the exact filename reported "
+                    "by the tool that created it."
                 ),
             },
         },

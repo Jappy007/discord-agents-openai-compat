@@ -121,49 +121,18 @@ function renderGlobalBar() {
     </div>
     <div class="gb">
       <span class="gk">Cost today</span>
-      <span class="gv">≈ $${(supervisor.cost_today_usd || 0).toFixed(2)}${
+      <span class="gv">${supervisor.cost_today_usd == null ? "—" : `≈ $${supervisor.cost_today_usd.toFixed(2)}`}${
         supervisor.cost_complete === false ? `<span class="tot"> (partial)</span>` : ""}</span>
     </div>
     <div class="gb spacer"></div>
-    <div class="gb key ${setup && !setup.anthropic_key_set ? "warn" : ""}" id="gb-key" title="Claude API key">
-      <span class="gk">Claude key</span>
-      <span class="gv">${setup ? (setup.anthropic_key_set ? "set ✓" : "not set — click") : "…"}</span>
+    <div class="gb key ${setup && (!setup.openai_key_set || !setup.openai_base_url_set) ? "warn" : ""}" title="OpenAI-compatible API settings come from .env">
+      <span class="gk">OpenAI API</span>
+      <span class="gv">${setup ? (setup.openai_key_set && setup.openai_base_url_set ? "configured ✓" : "check .env") : "…"}</span>
     </div>
     <div class="gb">
       <span class="gk">Last poll</span>
       <span class="gv">${now.toTimeString().slice(0, 8)}</span>
     </div>`;
-  document.getElementById("gb-key")?.addEventListener("click", openKeyDialog);
-}
-
-function openKeyDialog() {
-  const dlg = document.getElementById("dlg-key");
-  const input = document.getElementById("key-in");
-  const err = document.getElementById("key-err");
-  input.value = ""; err.style.display = "none";
-  dlg.showModal();
-  dlg.querySelector("form").onsubmit = async (e) => {
-    e.preventDefault();
-    const key = input.value.trim();
-    if (!key) { dlg.close(); return; }
-    err.style.display = "none";
-    const btn = dlg.querySelector(".btn.primary");
-    btn.disabled = true; btn.textContent = "Checking…";
-    try {
-      const r = await fetch("/api/setup/anthropic", {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key }),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(body.error || `validation failed (${r.status})`);
-      setup = await apiGet("/api/setup");
-      dlg.close();
-      renderGlobalBar();
-    } catch (ex) {
-      err.textContent = ex.message; err.style.display = "block";
-    }
-    btn.disabled = false; btn.textContent = "Validate & save";
-  };
 }
 
 function renderAll() { renderBoard(); renderGlobalBar(); }
@@ -256,6 +225,4 @@ document.getElementById("add-bot").addEventListener("click", (e) => {
     `supervisor v${supervisor.version}`;
   renderAll();
   setInterval(renderGlobalBar, 30_000);
-  // first-run onboarding: the install can't think without a Claude key
-  if (setup && !setup.anthropic_key_set) openKeyDialog();
 })();

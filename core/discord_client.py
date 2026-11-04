@@ -342,10 +342,7 @@ class DiscordClient(discord.Client):
             except Exception as e:
                 logger.error(f"Error processing crash detection: {e}", exc_info=True)
 
-        # Insert online tag for each channel in each server. (Re-enabled: the
-        # one-time 'startup hang' this was blamed for traced to the formerly
-        # synchronous skills upload blocking the loop, plus a UNIQUE collision
-        # on timestamp-only system message ids - both fixed.)
+        # Insert online tag for each channel in each server.
         online_time = datetime.utcnow()
         for guild in self.guilds:
             for channel in guild.text_channels:
@@ -422,7 +419,7 @@ class DiscordClient(discord.Client):
         if self.agentic_engine and self.agentic_engine.watch_manager:
             from tools.ask_prime import AskPrimeExecutor
             self.reactive_engine.ask_prime_executor = AskPrimeExecutor(
-                anthropic=self.reactive_engine.anthropic,
+                llm=self.reactive_engine.llm,
                 model=self.config.api.model,
                 vault_ids=self.config.vaults,
                 watch_manager=self.agentic_engine.watch_manager,
@@ -554,8 +551,8 @@ class DiscordClient(discord.Client):
                 attachment_ids = [att["attachment_id"] for att in processed_attachments]
 
                 # Build content blocks; role='assistant' yields text
-                # placeholders only - image/document/container_upload blocks
-                # in assistant turns 400 every subsequent API call
+                # placeholders only - image blocks in assistant turns are
+                # rejected by the API
                 content_blocks = []
 
                 # Add text content first if exists
@@ -772,7 +769,7 @@ class DiscordClient(discord.Client):
             logger.error(f"Error deleting message from storage: {e}")
 
         # Deleted content must not stay re-surfaceable through the
-        # attachment pipeline (local copy, Files API upload, index rows)
+        # attachment pipeline (local copy and index rows)
         if self.reactive_engine and self.reactive_engine.attachment_manager:
             try:
                 await self.reactive_engine.attachment_manager.delete_attachments_for_message(message_id)

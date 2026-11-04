@@ -1,5 +1,5 @@
 """
-Image Processing Pipeline for Claude API
+Image Processing Pipeline for the model API
 
 Multi-strategy compression to fit within 5MB API limit.
 Target: 73% of limit (~3.65MB) to account for Base64 overhead.
@@ -33,7 +33,7 @@ class ImageProcessor:
     """
 
     def __init__(self):
-        self.api_limit = 5 * 1024 * 1024  # 5MB per Claude API
+        self.api_limit = 5 * 1024 * 1024  # 5MB per model API
         self.target_size = int(self.api_limit * 0.73)  # Account for Base64 overhead
 
         # Security limits for downloads
@@ -48,7 +48,7 @@ class ImageProcessor:
 
     async def process_attachment(self, attachment) -> Optional[Dict]:
         """
-        Process Discord image attachment into Claude API format.
+        Process Discord image attachment into model API format.
 
         Returns:
             {
@@ -77,7 +77,7 @@ class ImageProcessor:
 
     async def process_bytes(self, filename: str, image_data: bytes) -> Optional[Dict]:
         """
-        Process raw image bytes into Claude API format - same contract as
+        Process raw image bytes into model API format - same contract as
         process_attachment, without the Discord download. Used for files that
         never went through upload-time processing (bot repository, v0.6.1).
         """

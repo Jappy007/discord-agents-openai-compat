@@ -18,7 +18,6 @@ from typing import Callable, List, Optional
 
 import yaml
 
-from core.internal_constants import estimate_cost_usd
 
 from .paths import SupervisorRoot
 
@@ -336,8 +335,7 @@ class BotData:
             },
             "context": context,
             "tokens_today": tokens,
-            "cost_today_usd": estimate_cost_usd(
-                tokens, (config.get("api") or {}).get("model", "")),
+            "cost_today_usd": None,  # pricing is endpoint/model-specific
             "dms": {"open": len(dms), "active_today": dm_active_today},
             "followups": self._followups_pending(bot_id, names),
             "watches": self._active_watches(bot_id, names),
@@ -355,14 +353,14 @@ class BotData:
             },
         }
 
-    # --- the monitor's four feeds (trace / raw log / episodes / skills) ---------
+    # --- the monitor's feeds (trace / raw log / episodes) -----------------------
 
     async def trace(self, bot_id: str, tail: int = 50) -> List[dict]:
         """Turn-events in the prototype's trace shape, newest-last."""
         db = self.root.messages_db(bot_id)
         names = self._names(bot_id)
         rows = _query(db, "SELECT ts, kind, server_id, channel_id, payload"
-                          " FROM events WHERE kind NOT IN ('reseed', 'skill')"
+                          " FROM events WHERE kind != 'reseed'"
                           " ORDER BY id DESC LIMIT ?", (tail,))
         out = []
         for r in rows:
@@ -404,28 +402,6 @@ class BotData:
                 "title": p.get("episode_title", ""),
                 "path": p.get("episodes_dir", ""),
                 "summary": p.get("episode_summary", ""),
-            })
-        return out
-
-    async def skills_list(self, bot_id: str, tail: int = 50) -> List[dict]:
-        db = self.root.messages_db(bot_id)
-        names = self._names(bot_id)
-        rows = _query(db, "SELECT ts, server_id, channel_id, payload FROM events"
-                          " WHERE kind = 'skill' ORDER BY id DESC LIMIT ?", (tail,))
-        out = []
-        for r in rows:
-            p = json.loads(r["payload"]) or {}
-            out.append({
-                "ts": r["ts"],
-                "channel": self._display(names, r["channel_id"]),
-                "server_name": ((names.get(r["server_id"]) or {}).get("name")
-                                if r["server_id"] else None),
-                "skill": "request_skill",
-                "name": p.get("skill_name", "?"),
-                "container": "fresh",  # request_skill always rebuilds (v0.5 rule)
-                "trigger": p.get("replace") and f"replacing {p['replace']}" or "",
-                "outcome": "loaded",
-                "tokens": p.get("tokens", {}),
             })
         return out
 

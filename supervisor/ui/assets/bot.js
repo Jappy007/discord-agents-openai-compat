@@ -115,7 +115,7 @@ function showTab(tab) {
 
 /* ============================ Monitor ============================ */
 
-let monStatus = null, monTrace = [], monMain = [], monEpisodes = [], monSkills = [];
+let monStatus = null, monTrace = [], monMain = [], monEpisodes = [];
 let monView = new URLSearchParams(location.search).get("view") || "channels";
 const MONITOR_REFRESH_MS = 5000;
 let monitorRefreshTimer = null;
@@ -134,22 +134,21 @@ function monitorIsActive() {
 }
 
 async function fetchMonitorSnapshot() {
-  const [status, stats, trace, main, episodes, skills] = await Promise.all([
+  const [status, stats, trace, main, episodes] = await Promise.all([
     apiGet(A("/status")),
     apiGet(A("/stats")),
     apiGet(A("/logs?file=conversations&tail=50")),
     apiGet(A("/logs?file=main&tail=50")),
     apiGet(A("/episodes")),
-    apiGet(A("/skills")),
   ]);
-  return { status, stats, trace, main, episodes, skills };
+  return { status, stats, trace, main, episodes };
 }
 
 function applyMonitorSnapshot(snapshot, options = {}) {
-  const { status, stats, trace, main, episodes, skills } = snapshot;
+  const { status, stats, trace, main, episodes } = snapshot;
   const scrollState = captureChannelScroll(options.preserveScroll);
   monStatus = status; monTrace = trace; monMain = main;
-  monEpisodes = episodes; monSkills = skills;
+  monEpisodes = episodes;
   renderNameplate(status);
   renderGauges(status);
   renderStatband(stats);
@@ -235,13 +234,12 @@ let chServer = null, chChannel = null;
 
 const SERVER_INITIALS = (name) => name.replace(/^#/, "").split(/[\s-]+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 
-/* a channel's full event stream: turns + skill invocations + episode reseeds */
+/* a channel's full event stream: turns + episode reseeds */
 function channelEvents(channelId, serverName) {
   const sameChan = (c) => c === channelId;
   const sameSrv = (sn) => serverName == null ? sn == null : sn === serverName;
   const ev = [];
   for (const t of monTrace) if (sameChan(t.channel) && sameSrv(t.server_name)) ev.push({ ts: t.ts, type: "turn", data: t });
-  for (const s of monSkills) if (sameChan(s.channel) && sameSrv(s.server_name)) ev.push({ ts: s.ts, type: "skill", data: s });
   for (const e of monEpisodes) if (sameChan(e.channel) && sameSrv(e.server_name)) ev.push({ ts: e.ts, type: "episode", data: e });
   ev.sort((a, b) => new Date(a.ts) - new Date(b.ts));
   return ev;
@@ -368,7 +366,7 @@ function renderActivity(options = {}) {
     return;
   }
   stopLogTail();
-  renderChannelMonitor(body, options);   // episodes + skills now live inside the channel streams
+  renderChannelMonitor(body, options);   // episodes live inside the channel streams
 }
 
 function renderChannelMonitor(body, options = {}) {
@@ -421,28 +419,11 @@ function streamHTML(chan, srv) {
     const day = new Date(ev.ts).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
     let sep = "";
     if (day !== lastDay) { sep = `<div class="tsep"><span>${day}</span></div>`; lastDay = day; }
-    const body = ev.type === "skill" ? skillStream(ev.data)
-      : ev.type === "episode" ? episodeStream(ev.data)
+    const body = ev.type === "episode" ? episodeStream(ev.data)
       : turnStream(ev.data, chan);
     return sep + body;
   }).join("");
   return `<div class="feed">${rows}</div>`;
-}
-
-/* a skill invocation, grounded where it happened */
-function skillStream(s) {
-  return `
-    <div class="actrow">
-      <div class="av" style="background:var(--info)">⚡</div>
-      <div>
-        <div class="head"><span class="un" style="color:var(--info)">${esc(botId)}</span>
-          <span class="skillchip">skill · ${esc(s.name)}</span>
-          <span class="ts">${clockTime(new Date(s.ts))}</span></div>
-        <div class="atrigger">${esc(s.trigger)}</div>
-        <div class="atext">${esc(s.outcome)}</div>
-        <div class="ameta">${s.container === "fresh" ? "fresh container" : "reused container"} · ${s.tokens.out} tokens out</div>
-      </div>
-    </div>`;
 }
 
 /* an episode = this channel's context consolidating into memory (a reseed) */
@@ -545,28 +526,6 @@ function episodesHTML(eps) {
         </div>
         <div class="evt-body">${esc(e.summary)}</div>
         <div class="evt-path">${esc(e.path)}</div>
-      </div>
-    </div>`;
-  }).join("")}</div>`;
-}
-
-/* Skills & capabilities the bot invoked */
-function skillsHTML(rows) {
-  return `<div class="evts">${rows.map((s) => {
-    const where = s.server_name ? `${esc(s.channel)} · ${esc(s.server_name)}` : esc(s.channel);
-    return `
-    <div class="evt">
-      <div class="when">
-        <div class="time figs">${dayClock(s.ts)}</div>
-        <div class="where">${where}</div>
-      </div>
-      <div class="what">
-        <div class="evt-head">
-          <span class="badge skill">${esc(s.name)}</span>
-          <span class="evt-meta">${s.container === "fresh" ? "fresh container" : "reused container"} · ${s.tokens.out} out</span>
-        </div>
-        <div class="evt-trigger">${esc(s.trigger)}</div>
-        <div class="evt-body">${esc(s.outcome)}</div>
       </div>
     </div>`;
   }).join("")}</div>`;
@@ -742,13 +701,6 @@ function wireActivity() {
    YAML omits a key), then everything else inside a collapsed Advanced
    section. Checkboxes mean one thing: checked = on. */
 
-const MODEL_OPTIONS = [
-  "claude-fable-5", "claude-opus-4-8", "claude-sonnet-5",
-];
-// mirrors internal_constants._EFFORT_CAPABLE_MARKERS
-const EFFORT_MARKERS = ["fable", "opus-4-5", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6", "sonnet-5"];
-const supportsEffort = (m) => EFFORT_MARKERS.some((x) => (m || "").includes(x));
-
 // Curated IANA timezones for the dropdown (no more typing); the current value
 // is preserved even if it's not in this list.
 const TIMEZONES = [
@@ -772,21 +724,18 @@ const nearestBackfillStop = (d) =>
 /* config.py defaults - merged under the loaded YAML so every essential
    renders even in a minimal config */
 const DEFAULTS = {
-  discord: { servers: [], timezone: "UTC", status: "Powered by Claude",
+  discord: { servers: [], timezone: "UTC", status: "Online",
     allow_bot_interactions: false, backfill_enabled: true, backfill_days: 30 },
   personality: { base_prompt: "", reaction_usage: "moderate" },
   reactive: { enabled: true, always_respond_to_mentions: true,
     rate_limit: "moderate", check_interval_seconds: 60 },
   agentic: { enabled: false, check_interval_hours: 1.0,
     followups: { enabled: false },
-    consolidation: { enabled: true, interval_days: 7 },
     proactive: { enabled: false, intensity: "moderate",
       quiet_hours: [0, 1, 2, 3, 4, 5, 6], allowed_channels: [] } },
-  api: { model: "claude-sonnet-5", max_tokens: 4096, context_messages: 30,
-    context_tokens: 80000, effort: null, consolidation_model: "claude-sonnet-5",
-    thinking: { enabled: true }, web_search: { enabled: false } },
+  api: { model: "", max_tokens: 4096, context_messages: 30,
+    context_tokens: 80000 },
   mcp: { enabled: false },
-  skills: { include_anthropic_skills: true, default_skills: [] },
   attachments: { enabled: false, backfill_enabled: true, backfill_days: 30,
     repository: { enabled: true } },
   logging: { level: "INFO" },
@@ -802,7 +751,7 @@ const HIDDEN = new Set([
   "attachments.backfill_enabled", "attachments.backfill_days",
 ]);
 // Whole sections that belong to the Integrations tab, not Configure.
-const HIDDEN_SECTIONS = new Set(["mcp", "skills"]);
+const HIDDEN_SECTIONS = new Set(["mcp"]);
 
 const HINTS = {
   "name": { label: "Name", help: "Display name in the dashboard." },
@@ -841,21 +790,13 @@ const HINTS = {
   "agentic.proactive.quiet_hours": { label: "Quiet hours", help: "Local-clock hours when it stays silent. Click hours to toggle.", widget: "hours" },
   "agentic.proactive.allowed_channels": { label: "Proactive channels", help: "Where unprompted openings are permitted. Empty = none.", widget: "channels" },
 
-  "api.model": { label: "Model", options: MODEL_OPTIONS, help: "The mind. Fable 5 is the most capable; Sonnet 5 the most economical. Haiku isn't offered here — it doesn't reliably support adaptive thinking, and this pipeline always sends it when api.thinking.enabled is on." },
+  "api.model": { label: "Model", help: "Model name to send to your OpenAI-compatible endpoint. Leave empty to use OPENAI_MODEL from .env." },
   "api.max_tokens": { label: "Max tokens", help: "Cap on tokens per response." },
   "api.context_messages": { label: "Context messages", help: "Live messages kept before reseed (5–100).", min: 5, max: 100 },
   "api.context_tokens": { label: "Context ceiling", help: "Token budget before distill + reseed." },
-  "api.effort": { label: "Effort", help: "Depth-of-thought dial. Only models with effort support show this.", widget: "effort" },
-  "api.consolidation_model": { label: "Memory model", options: ["claude-sonnet-5", "claude-fable-5", "claude-opus-4-8"], help: "Distills episodes, runs weekly reconsolidation, and powers induction. Uses medium thinking effort." },
-  "agentic.consolidation.enabled": { label: "Reconsolidation", help: "The background pass that revisits and tidies the bot's own memory. Costs tokens (Batches API, half-price) — turn it off to freeze memory at what the bot writes live." },
-  "agentic.consolidation.interval_days": { label: "Reconsolidation interval", help: "Days between reconsolidation passes per server. Longer = cheaper and more stable, less fresh.", min: 1 },
-  "api.thinking.enabled": { label: "Extended thinking", help: "Adaptive thinking; the model decides when." },
-  "api.web_search.enabled": { label: "Web search", help: "Live web lookups when conversation calls for it." },
+  "api.web_search.enabled": { label: "Web search", help: "Client-side web lookups when conversation calls for it." },
 
   "mcp.enabled": { label: "MCP servers", help: "Load Model Context Protocol servers (see Integrations)." },
-  "skills.include_anthropic_skills": { label: "Anthropic skills", help: "Make the built-in pdf / xlsx / docx / pptx skills available for the bot to use on demand." },
-  "skills.default_skills": { label: "Preloaded skills", help: "Skills loaded at the start of every conversation; anything else is requested only when needed.", widget: "chips" },
-
   "attachments.enabled": { label: "Attachments", help: "Unified file/image handling." },
   "attachments.backfill_enabled": { label: "Backfill attachments", help: "Pull prior attachments on first join." },
   "attachments.backfill_days": { label: "Attachment backfill days", help: "0 = unlimited." },
@@ -880,9 +821,7 @@ const CONFIG_TABS = [
     "__token__", "discord.servers", "discord.timezone",
     "discord.backfill_days", "discord.allow_bot_interactions"] },
   { title: "Brain", items: [
-    "api.model", "api.effort", "api.thinking.enabled",
-    "api.web_search.enabled", "api.consolidation_model",
-    "agentic.consolidation.enabled", "agentic.consolidation.interval_days"] },
+    "api.model", "api.web_search.enabled"] },
   { title: "Engagement", items: [
     "reactive.enabled", "reactive.rate_limit", "agentic.enabled",
     "agentic.proactive.enabled", "agentic.proactive.intensity",
@@ -891,7 +830,7 @@ const CONFIG_TABS = [
 ];
 
 /* Named tabs + an Advanced tab. Advanced holds every leaf not claimed above
-   and not in a hidden section (mcp/skills live in Integrations), grouped by
+   and not in a hidden section (mcp lives in Integrations), grouped by
    section so it isn't one undifferentiated scroll. */
 function configTabs() {
   const claimed = new Set(
@@ -934,10 +873,6 @@ async function loadConfigure() {
   const form = document.getElementById("cfg-form");
   buildForm();
   form.addEventListener("input", () => setDirty(true));
-  form.addEventListener("change", (e) => {
-    // model switch shows/hides the effort dial
-    if (e.target.closest('.field[data-path="api.model"]')) renderEffortGate();
-  });
   form.addEventListener("click", onFormClick);
   form.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.matches(".chip-in")) {
@@ -1048,13 +983,6 @@ function ctlHTML(widget, val, h, path) {
       return chipsHTML(val) +
         `<button class="btn small fetch-channels" type="button">Choose from Discord…</button>
          <div class="picker"></div><div class="err"></div>`;
-    case "effort": {
-      const cur = val ?? "";
-      const titleize = (o) => o.charAt(0).toUpperCase() + o.slice(1);
-      const opts = ["", "low", "medium", "high", "max"].map((o) =>
-        `<option value="${o}" ${o === cur ? "selected" : ""}>${o ? titleize(o) : "Default (high)"}</option>`).join("");
-      return `<select>${opts}</select>`;
-    }
     case "backfill": {
       const enabled = getNested(cfg, "discord.backfill_enabled");
       const days = Number(val) || 0;
@@ -1242,15 +1170,6 @@ function setDirty(d) {
   document.getElementById("cfg-save").disabled = !d;
 }
 
-/* Effort only renders meaningfully on effort-capable models; switching to a
-   model without it hides the dial (and the collected value goes null). */
-function renderEffortGate() {
-  const modelSel = document.querySelector('.field[data-path="api.model"] select');
-  const effortField = document.querySelector('.field[data-path="api.effort"]');
-  if (!modelSel || !effortField) return;
-  effortField.style.display = supportsEffort(modelSel.value) ? "" : "none";
-}
-
 /* read one field's current value out of the DOM */
 function fieldValue(field) {
   const widget = field.dataset.widget;
@@ -1265,11 +1184,6 @@ function fieldValue(field) {
     case "number": return Number(ctl.querySelector("input[type=number]").value);
     case "hours":
       return [...ctl.querySelectorAll(".hr.sel")].map((c) => Number(c.dataset.h)).sort((a, b) => a - b);
-    case "effort": {
-      const modelSel = document.querySelector('.field[data-path="api.model"] select');
-      if (modelSel && !supportsEffort(modelSel.value)) return null;
-      return ctl.querySelector("select").value || null;
-    }
     case "select": return ctl.querySelector("select").value;
     case "radioset":
       return ctl.querySelector("input[type=radio]:checked")?.value ?? null;
@@ -1510,30 +1424,12 @@ function renderMarkdown(src) {
   return html + closeList();
 }
 
-/* ---- Memories: browser + new-file + induction (memory pre-population) ---- */
+/* ---- Memories: browser + new-file ---- */
 
 async function loadMemories() {
   const panel = document.getElementById("tab-memories");
-  const [tree, status] = await Promise.all([
-    apiGet(A("/memory/tree")), apiGet(A("/status"))]);
-  const serverOpts = (status.servers || []).map((s) =>
-    `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+  const tree = await apiGet(A("/memory/tree"));
   panel.innerHTML = `
-    <div class="induct">
-      <div class="ihead">
-        <h3>Build starting memory</h3>
-        <span class="sub">induction — distill a server's stored history into
-          memory the bot starts with</span>
-      </div>
-      <div class="irow">
-        <select id="ind-server">${serverOpts || `<option value="">no servers configured</option>`}</select>
-        <button class="btn small" id="ind-dry">Preview scope &amp; cost</button>
-        <button class="btn small primary" id="ind-run">Run induction</button>
-        <span class="inote">uses the memory model from Configure · the bot must
-          be stopped${status.running ? " — <b>it is running now</b>" : ""}</span>
-      </div>
-      <pre class="iout" id="ind-out" hidden></pre>
-    </div>
     <div class="browse-bar">
       <button class="btn small" id="mem-new">+ New memory file</button>
       <span class="sub">memory files are the bot's own notes — edits land
@@ -1542,9 +1438,6 @@ async function loadMemories() {
     <div id="mem-browser"></div>`;
   makeBrowser(document.getElementById("mem-browser"), tree, "memory");
   document.getElementById("mem-new").onclick = newMemoryFile;
-  document.getElementById("ind-dry").onclick = () => startInduct(true);
-  document.getElementById("ind-run").onclick = () => startInduct(false);
-  pollInduct(false); // surface an induction already in flight
 }
 
 function newMemoryFile() {
@@ -1567,46 +1460,6 @@ function newMemoryFile() {
     dlg.close();
     loadMemories();
   };
-}
-
-let inductTimer = null;
-async function startInduct(dryRun) {
-  const server = document.getElementById("ind-server").value;
-  const out = document.getElementById("ind-out");
-  if (!server) return;
-  if (!dryRun && !confirm(
-    "Run a full induction? This writes starting-memory files for the " +
-    "selected server (existing memory files are not overwritten silently — " +
-    "per-channel failures write nothing). It uses the Batches API and can " +
-    "take a while.")) return;
-  out.hidden = false;
-  out.textContent = dryRun ? "previewing…" : "induction starting…";
-  try {
-    const r = await fetch(A("/induct"), {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ server, dry_run: dryRun }),
-    });
-    const bodyJson = await r.json().catch(() => ({}));
-    if (!r.ok) { out.textContent = bodyJson.error || `failed (${r.status})`; return; }
-  } catch (e) { out.textContent = String(e); return; }
-  pollInduct(true);
-}
-
-async function pollInduct(loud) {
-  clearTimeout(inductTimer);
-  const out = document.getElementById("ind-out");
-  if (!out) return;
-  let st;
-  try { st = await apiGet(A("/induct")); } catch { return; }
-  if (!st.lines.length && !st.running && !loud) return; // nothing to show
-  out.hidden = false;
-  out.textContent = st.lines.join("\n") || (st.running ? "working…" : "");
-  out.scrollTop = out.scrollHeight;
-  if (st.running) inductTimer = setTimeout(() => pollInduct(true), 2500);
-  else if (loud) {
-    out.textContent += st.returncode === 0
-      ? "\n\n— done." : `\n\n— exited with code ${st.returncode}.`;
-  }
 }
 
 /* ---- Repository: a small Finder — upload, new folder, rename, drag-move ---- */
@@ -1834,7 +1687,7 @@ function wireRepo(panel, tree) {
   if (first) { first.classList.add("active"); showFile(paneEl, JSON.parse(first.dataset.file), "repository"); }
 }
 
-/* ====================== Integrations (skills + MCP) ====================== */
+/* ====================== Integrations (MCP) ====================== */
 
 let intl = null;            // the loaded integrations payload
 let intPending = [];        // human-readable pending changes (require restart)
@@ -1842,28 +1695,13 @@ let intPending = [];        // human-readable pending changes (require restart)
 async function loadIntegrations() {
   intl = await apiGet(A("/integrations"));
   intPending = [];
-  renderSkills(); renderMcp(); renderRestartBar();
+  renderMcp(); renderRestartBar();
   wireIntegrations();
 }
 
 function markPending(desc) {
   intPending.push(desc);
   renderRestartBar();
-}
-
-function renderSkills() {
-  const on = intl.skills.filter((s) => s.enabled).length;
-  document.getElementById("skills-count").textContent = `${on} of ${intl.skills.length} enabled`;
-  document.getElementById("skills-list").innerHTML = intl.skills.map((s) => `
-    <div class="skill ${s.enabled ? "on" : ""}" data-skill="${esc(s.id)}">
-      <div class="sw"></div>
-      <div class="meta">
-        <div class="name">${esc(s.name)}<span class="src ${s.source === "custom" ? "custom" : ""}">${esc(s.source)}</span></div>
-        <div class="desc">${esc(s.description)}</div>
-      </div>
-      <div class="use">${s.enabled ? `${s.used_7d} uses · 7d` : "disabled"}</div>
-      ${s.source === "custom" ? `<button class="srm" data-act="remove" title="Delete this skill from disk">Remove</button>` : ""}
-    </div>`).join("");
 }
 
 const MCP_STATE = { connected: "Connected", error: "Error", connecting: "Connecting…", disabled: "Disabled" };
@@ -1913,25 +1751,6 @@ let intWired = false;
 function wireIntegrations() {
   if (intWired) return; intWired = true;
 
-  document.getElementById("skills-list").addEventListener("click", async (e) => {
-    const row = e.target.closest(".skill");
-    if (!row) return;
-    const s = intl.skills.find((x) => x.id === row.dataset.skill);
-    // Remove = delete the skill from disk (shared across bots), now — not staged.
-    if (e.target.closest('[data-act="remove"]')) {
-      if (!confirm(`Remove the skill “${s.name}” from disk?\n\nSkills live in one shared folder, so this removes it for every bot. It takes effect on each bot's next start.`)) return;
-      try {
-        await apiSend("DELETE", A(`/skills/${encodeURIComponent(s.name)}`));
-        intl.skills = intl.skills.filter((x) => x.id !== s.id);
-        renderSkills();
-      } catch (ex) { alert("Couldn't remove the skill — see the supervisor log."); }
-      return;
-    }
-    s.enabled = !s.enabled;
-    markPending(`${s.enabled ? "enable" : "disable"} skill “${s.name}”`);
-    renderSkills();
-  });
-
   document.getElementById("mcp-list").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-act]");
     if (!btn) return;
@@ -1949,7 +1768,6 @@ function wireIntegrations() {
   });
 
   document.getElementById("mcp-add").addEventListener("click", () => openMcpDialog(null));
-  document.getElementById("skill-add").addEventListener("click", openSkillDialog);
   document.getElementById("restart-discard").addEventListener("click", () => loadIntegrations());
   document.getElementById("restart-save").addEventListener("click", saveAndRestart);
 
@@ -1959,48 +1777,6 @@ function wireIntegrations() {
     document.getElementById("mcp-target-label").textContent = tr.value === "stdio" ? "Command" : "URL";
     document.getElementById("mcp-target").placeholder = tr.value === "stdio" ? "python -m my_mcp_server" : "https://…";
   });
-}
-
-function openSkillDialog() {
-  const dlg = document.getElementById("dlg-skill");
-  const input = document.getElementById("skill-file");
-  const err = document.getElementById("skill-err");
-  input.value = ""; err.style.display = "none";
-  dlg.showModal();
-  dlg.querySelector("form").onsubmit = async (e) => {
-    e.preventDefault();
-    const file = input.files && input.files[0];
-    if (!file) { err.textContent = "choose a skill .zip first"; err.style.display = "block"; return; }
-    const base = file.name.replace(/\.(zip|skill)$/i, "");
-    const id = base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    if (intl.skills.some((s) => s.id === id)) {
-      err.textContent = `a skill named “${id}” is already installed`; err.style.display = "block"; return;
-    }
-    // actually upload the file to disk (this was missing — the skill name was
-    // landing in default_skills with no file behind it, hence "not in catalog")
-    const sub = dlg.querySelector("button[type=submit], .btn.primary");
-    err.style.display = "none";
-    if (sub) { sub.disabled = true; sub.textContent = "Uploading…"; }
-    try {
-      const r = await fetch(A(`/skills?name=${encodeURIComponent(id)}`),
-                           { method: "POST", body: file });
-      if (!r.ok) {
-        const b = await r.json().catch(() => ({}));
-        throw new Error(b.error || `upload failed (${r.status})`);
-      }
-    } catch (ex) {
-      err.textContent = ex.message; err.style.display = "block";
-      if (sub) { sub.disabled = false; sub.textContent = "Add skill"; }
-      return;
-    }
-    if (sub) { sub.disabled = false; sub.textContent = "Add skill"; }
-    dlg.close();
-    // on disk now; enable it (membership in default_skills, applied on save)
-    intl.skills.push({ id, name: id, source: "custom", enabled: true,
-      description: `Uploaded from ${file.name} — loads on next start.`, used_7d: 0 });
-    markPending(`add skill “${id}”`);
-    renderSkills();
-  };
 }
 
 async function reconnect(m) {
@@ -2065,12 +1841,11 @@ async function saveAndRestart() {
     }
   });
   intPending = [];
-  renderMcp(); renderSkills();
-  const on = intl.skills.filter((s) => s.enabled).length;
+  renderMcp();
   const live = intl.mcp_servers.filter((m) => m.status === "connected").length;
   bar.className = "restart-bar show done";
   document.getElementById("restart-msg").innerHTML =
-    `<b>${botId} back online</b> — ${on} skills, ${live} MCP servers loaded.`;
+    `<b>${botId} back online</b> — ${live} MCP servers loaded.`;
   save.disabled = false;
   setTimeout(() => { if (!intPending.length) bar.className = "restart-bar"; }, 4000);
 }

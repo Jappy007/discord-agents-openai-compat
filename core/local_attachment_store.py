@@ -1,11 +1,9 @@
 """
 Local Attachment Store - disk-backed delivery channel for generated files.
 
-The Files API / code-execution container are Anthropic-only server features;
-under LLM_PROVIDER=openai_compatible they are stubbed out (FeatureNotSupportedError).
 This store gives client-side tools a place to write generated deliverables
 (pptx, ...) so they can ride send_message's attach_outputs / end-of-turn file
-delivery exactly like container outputs do.
+delivery.
 
 Layout: persistence/outputs/{bot_id}/ - created lazily. Files survive across
 turns (the bot is long-lived) and are name-addressed (sanitized), which is all

@@ -1,11 +1,9 @@
 """
-Client-side web_search / web_fetch tools for LLM_PROVIDER=openai_compatible.
+Client-side web_search / web_fetch tools.
 
-Anthropic's web_search / web_fetch (tools/web_search.py) are server-side
-tools executed by Anthropic itself - there's no equivalent wire-protocol
-feature for a generic OpenAI-compatible endpoint. These are ordinary
-function tools instead: the model calls them, this module makes the actual
-search/HTTP request, and the result goes back as a normal tool_result.
+These are ordinary function tools: the model calls them, this module makes
+the actual search/HTTP request, and the result goes back as a normal
+tool_result. No provider-side server tools are involved.
 
 Search backend: DuckDuckGo via the `ddgs` package (https://pypi.org/project/ddgs/).
 No API key, no account, no card - it scrapes DuckDuckGo/Bing's public result

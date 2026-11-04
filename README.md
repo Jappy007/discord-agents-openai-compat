@@ -2,7 +2,7 @@
 
 **Version:** 0.12.4 (Pre-release Beta)
 
-Build intelligent Discord bots that think, remember, and act autonomously. Powered by Claude.
+Build intelligent Discord bots that think, remember, and act autonomously on any OpenAI-compatible model endpoint.
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Discord.py](https://img.shields.io/badge/discord.py-2.3+-blue.svg)](https://discordpy.readthedocs.io/)
@@ -43,13 +43,7 @@ engagement rates so it backs off where it isn't wanted.
   the same person across every server while keeping what it learned where
   it learned it.
 - **Long-term memory** — Markdown files (profiles, channel notes, server
-  culture) the bot reads and writes itself; a weekly reconsolidation pass
-  (Batches API, half-price tokens) compacts old episodes into era digests
-  and rewrites profiles from evidence.
-- **Server induction** — point the bot at a server with history and
-  `python bot_manager.py induct` distills the stored backlog into starting
-  memory, explicitly framed as observations rather than lived experience
-  (`--dry-run` prints a cost table first).
+  culture) the bot reads and writes itself.
 - **Message history** — SQLite with FTS5 full-text search; the bot can search
   and quote its own channel history on demand.
 - **Attachments** — images, documents, spreadsheets, and code files are
@@ -83,11 +77,10 @@ Prime itself.
 
 ### Capabilities
 
-- **Skills + code execution** — drop `.zip` skill packages into `/skills/`;
-  Anthropic's built-in document skills (xlsx, pptx, docx, pdf) are included.
-  Files the bot creates in its sandbox (decks, charts, exports) attach
-  directly to its Discord reply.
-- **Web search** with automatic citations.
+- **Presentations** — `create_pptx` builds a deck locally and attaches it
+  directly to the bot's Discord reply.
+- **Web search** — client-side search and page-fetch tools, with no API key
+  required.
 - **MCP integration** — connect remote MCP servers; their tools are
   auto-discovered and available to the bot.
 - **Vision** — image attachments are processed and understood in context.
@@ -107,11 +100,11 @@ Prime itself.
   monitor that shows the bot's *x-ray stream*: what it read, what it
   thought, which tools it called, what it said or why it stayed quiet),
   Configure (the YAML as a form, validated by the same code the bot boots
-  with), Integrations (skill toggles, MCP health), Memories (browse and
-  edit), Repository.
+  with), Integrations (MCP health), Memories (browse and edit), Repository.
 - **Desktop app (v0.10: self-contained)** — the Windows installer ships an
   embedded Python runtime and the framework: download, run, create a bot,
-  paste your Claude key and Discord token in the app, press Start. No
+  set your OpenAI-compatible endpoint in `.env`, paste your Discord token in
+  the app, press Start. No
   Python, no git, no terminal. Bot data lives in `%APPDATA%\Discord Agents`
   and survives updates; closing the window stops bots cleanly and they
   return on relaunch. (A git checkout + `app-config.json` keeps the
@@ -124,8 +117,6 @@ Prime itself.
 ### Production posture
 
 - Per-channel rate-limit presets with engagement-aware backoff
-- Prompt-cache-aware request layout (a few hundred uncached tokens per turn
-  in steady state — the conversation prefix stays cached)
 - Persistent conversation state across restarts; crash detection and catch-up
 - **Vaults** — mark any channel or server and its content never leaves it:
   excluded from outside search and attachments, memory files sealed
@@ -141,10 +132,9 @@ Prime itself.
 - **Python 3.10+** — [Download](https://www.python.org/downloads/)
 - **Discord Bot** — [Create application](https://discord.com/developers/applications)
   - Enable "Message Content Intent" in Bot settings
-- **Anthropic API Key** — [Get key](https://console.anthropic.com/)
-  - Defaults to `claude-sonnet-5`. Any Claude 4-family model works; the
-    optional `api.effort` setting requires an effort-capable model (validated
-    at startup).
+- **OpenAI-compatible API** — any `/chat/completions` endpoint and model.
+  - Set `OPENAI_API_KEY` and `OPENAI_BASE_URL`, and either `OPENAI_MODEL` or
+    `api.model` in the bot YAML. See `OPENAI_COMPATIBILITY.md`.
 
 ---
 
@@ -153,9 +143,9 @@ Prime itself.
 ### The short way (no Python, no git)
 
 Download **Discord Agents Setup** from the latest release, run it, and the
-app walks you through the rest: paste a Claude API key on first launch,
-commission a bot, paste its Discord token on the bot's Configure tab, pick
-its servers from a list, press Start. Everything below is the developer
+app walks you through the rest: configure your OpenAI-compatible endpoint in
+`.env`, commission a bot, paste its Discord token on the bot's Configure tab,
+pick its servers from a list, press Start. Everything below is the developer
 path.
 
 ### 1. Clone and install
@@ -176,7 +166,9 @@ Edit `.env`:
 
 ```bash
 ALPHA_BOT_TOKEN=your_discord_bot_token_here
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
+OPENAI_API_KEY=your_provider_api_key_here
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o
 ```
 
 ### 3. Configure your bot
@@ -238,10 +230,11 @@ agentic:
     quiet_hours: [0, 1, 2, 3, 4, 5, 6]   # LOCAL host-clock hours
 
 api:
-  model: "claude-sonnet-5"
+  model: ""                     # Empty = use OPENAI_MODEL from .env
   context_messages: 30          # Rolling window of Discord messages
   context_tokens: 80000         # Session threshold: episodize + reseed past this
-  effort: "medium"              # Optional cost/depth dial (low|medium|high|max)
+  web_search:
+    enabled: true               # Client-side web search/fetch tools
 ```
 
 See `bots/alpha.yaml.example` for the complete annotated reference, and
@@ -332,8 +325,8 @@ reporting via [GitHub Security Advisories](../../security/advisories/new)
   Rotate immediately if exposed.
 - **Rate limiting** is per-channel with preset tiers; the bot also silences
   itself after consecutive ignored messages.
-- **Web search** is capped per request; code execution runs in Anthropic's
-  sandbox, not on your host.
+- **Web search** runs client-side through the bot's own process; page
+  content is treated as untrusted data.
 - **Vaults** mechanically seal a channel's or server's content (search,
   memory, attachments, repository) — validated in both directions by live
   testing; a mandatory discretion prompt handles everything finer.
@@ -380,7 +373,7 @@ No license file yet — all rights reserved until one is added.
 
 Built with:
 
-- [Anthropic Claude](https://www.anthropic.com/) — AI foundation
+- [OpenAI](https://openai.com/) and the OpenAI-compatible ecosystem — model API
 - [discord.py](https://discordpy.readthedocs.io/) — Discord integration
 - [aiosqlite](https://github.com/omnilib/aiosqlite) — async SQLite
 

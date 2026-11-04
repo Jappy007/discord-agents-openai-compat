@@ -216,16 +216,16 @@ class MCPManager:
 
     def get_tools_for_api(self) -> List[Dict]:
         """
-        Get all discovered tools formatted for Claude API.
+        Get all discovered tools formatted for model API.
 
         Returns:
-            List of tool definitions in Claude API format
+            List of tool definitions in model API format
         """
         all_tools = []
 
         for server_name, tools in self.tools_cache.items():
             for tool in tools:
-                # Format for Claude API
+                # Format for model API
                 all_tools.append({
                     "name": tool["name"],
                     "description": tool.get("description", ""),

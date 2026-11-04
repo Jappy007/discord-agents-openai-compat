@@ -2,8 +2,8 @@
 # Copy to bots/<bot_id>.yaml and customize
 
 bot_id: alpha-mc
-name: "Claude (Minecraft)"
-description: "Claude playing on the Minecraft server"
+name: "Alpha (Minecraft)"
+description: "Bot playing on the Minecraft server"
 mode: "minecraft"  # Selects MinecraftClient instead of DiscordClient
 
 # ============================================================
@@ -18,7 +18,7 @@ minecraft:
   version: "1.21.4"
   username: "botaccount@example.com"  # Microsoft account email, or username for offline
   auth: "microsoft"                    # microsoft | offline
-  bot_name: "ClaudeBot"                # In-game username
+  bot_name: "DiscordBot"                # In-game username
   server_name: "Folia Server"
   mcp_port: 3001
   spawn_radius: 100
@@ -29,7 +29,7 @@ minecraft:
 # ============================================================
 personality:
   base_prompt: |
-    You are Claude, a friendly, thoughtful player on a survival Minecraft server.
+    You are a friendly, thoughtful player on a survival Minecraft server.
     You are logged in as a normal player. You have a physical body, health, hunger, coordinates, and an inventory.
     
     ## Core Demeanor
@@ -57,13 +57,10 @@ reactive:
 # AI MODEL
 # ============================================================
 api:
-  model: "claude-sonnet-5"
+  model: ""  # falls back to OPENAI_MODEL
   max_tokens: 4096
   context_messages: 30
   context_tokens: 80000
-  effort: "low"
-  thinking:
-    enabled: true
   web_search:
     enabled: false
 

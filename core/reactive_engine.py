@@ -14,7 +14,6 @@ import io
 import json
 import logging
 import re
-from anthropic import NotFoundError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, List, Optional, TYPE_CHECKING
@@ -37,17 +36,13 @@ if TYPE_CHECKING:
 from .memory_tool_executor import MemoryToolExecutor
 from .context_builder import ContextBuilder
 from .mcp_manager import MCPManager
-from .skills_manager import SkillsManager
 from .unified_attachment_manager import UnifiedAttachmentManager
-from .files_api_client import FilesAPIClient
 from .vaults import VaultEnforcer
 from .conversation_state_manager import ConversationStateManager
 from .internal_constants import (
     TOOL_STUB_KEEP_TURNS, PRIME_CONTEXT_TEMPLATE, format_size, model_max_output,
 )
-from tools.web_search import get_web_search_tools
 from tools.discord_tools import DiscordToolExecutor, get_discord_tools
-from tools.skills_tool import get_skill_request_tool, SkillRequestExecutor
 from core.local_attachment_store import LocalAttachmentStore
 
 logger = logging.getLogger(__name__)
@@ -68,35 +63,12 @@ def total_input_tokens(usage) -> int:
 
 
 def serialize_assistant_blocks(content) -> list:
-    """
-    Convert SDK response content into dicts safe to persist and replay.
-
-    Server tool blocks (server_tool_use, code execution, web search/fetch and
-    their results) are deliberately dropped: detached from the live response
-    their content shapes can't be reproduced (a stringified result 400s on
-    replay), and the assistant's final text already carries the conclusions.
-
-    When server blocks are dropped, thinking blocks go with them: their
-    signatures bind to the original block sequence, so a thinking block
-    re-sent without the server blocks it surrounded 400s as "modified".
-    History thinking is optional - mid-loop continuations use the live
-    response.content, never this serialized form.
-    """
+    """Convert response content into dicts safe to persist and replay."""
     serialized = []
-    dropped_server_block = False
     for block in content:
         block_type = getattr(block, "type", None)
         if block_type == "text":
             serialized.append({"type": "text", "text": block.text})
-        elif block_type == "thinking":
-            # Signature required for tool-use continuity on replay
-            serialized.append({
-                "type": "thinking",
-                "thinking": block.thinking,
-                "signature": block.signature,
-            })
-        elif block_type == "redacted_thinking":
-            serialized.append({"type": "redacted_thinking", "data": block.data})
         elif block_type == "tool_use":
             serialized.append({
                 "type": "tool_use",
@@ -104,76 +76,7 @@ def serialize_assistant_blocks(content) -> list:
                 "name": block.name,
                 "input": block.input,
             })
-        else:
-            dropped_server_block = True
-    if dropped_server_block:
-        serialized = [
-            b for b in serialized
-            if b["type"] not in ("thinking", "redacted_thinking")
-        ]
     return serialized
-
-
-def collect_container_output_file_ids(response) -> list:
-    """
-    File IDs of files written by code execution in this response.
-    Output blocks ride inside code_execution / bash_code_execution tool
-    results; error results have no output list (getattr returns None).
-    """
-    file_ids = []
-    for block in response.content:
-        if getattr(block, "type", None) in (
-            "code_execution_tool_result",
-            "bash_code_execution_tool_result",
-        ):
-            result_content = getattr(block, "content", None)
-            for output in (getattr(result_content, "content", None) or []):
-                file_id = getattr(output, "file_id", None)
-                if file_id:
-                    file_ids.append(file_id)
-    return file_ids
-
-
-_CACHEABLE_BLOCK_TYPES = frozenset({"text", "tool_result", "image", "document"})
-
-
-def with_message_cache_breakpoint(messages: list) -> list:
-    """
-    Copy of messages with cache_control on the last cacheable block, so each
-    request caches the whole conversation up to its tail (the system-prefix
-    breakpoint alone re-reads the full history every turn). Old breakpoints
-    need no removal: the marked message is rebuilt fresh from state each
-    request, and markers don't affect prefix matching - the next turn's
-    breakpoint lands further down and reads the previous one's cache.
-
-    This only pays off because NOTHING upstream of the messages is volatile:
-    the cache hierarchy is tools -> system -> messages, so per-request
-    content (timestamp, momentum, attachment index) must ride AFTER this
-    breakpoint - see the volatile tail in _run_tool_loop - never in a
-    system block, or every lookup here would miss.
-
-    The source messages are never mutated (their dicts are shared with
-    conversation state). SDK objects (in-loop assistant content) and
-    unmarkable block types are skipped by walking backwards.
-    """
-    for mi in range(len(messages) - 1, -1, -1):
-        content = messages[mi].get("content") if isinstance(messages[mi], dict) else None
-        if isinstance(content, str):
-            new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-        elif isinstance(content, list):
-            for bi in range(len(content) - 1, -1, -1):
-                block = content[bi]
-                if isinstance(block, dict) and block.get("type") in _CACHEABLE_BLOCK_TYPES:
-                    new_content = list(content)
-                    new_content[bi] = {**block, "cache_control": {"type": "ephemeral"}}
-                    break
-            else:
-                continue
-        else:
-            continue
-        new_msg = {**messages[mi], "content": new_content}
-        return messages[:mi] + [new_msg] + messages[mi + 1:]
-    return messages
 
 
 def memory_intent(kind: str, text: str, display_name: str) -> str:
@@ -210,28 +113,18 @@ class _SyntheticDMMessage:
 class ToolLoopResult:
     """Outcome of one full tool-use loop (one bot turn)."""
     response_text: str = ""
-    thinking_text: str = ""
-    thinking_block: Any = None
     tools_were_used: bool = False
     usage: Any = None  # usage of the final response in the loop
-    container_file_ids: List[str] = field(default_factory=list)
     tool_calls: List[dict] = field(default_factory=list)  # {tool, action, detail} per call (v0.9)
     # Native messaging (v0.12.0): messages the model sent via send_message
     sent_message_ids: List[str] = field(default_factory=list)
     last_sent_message: Any = None  # discord.Message, for engagement tracking
-    consumed_file_ids: set = field(default_factory=set)  # tool-attached, don't re-send
     consumed_local_files: set = field(default_factory=set)  # local attachments, don't re-send
 
     @property
     def did_send(self) -> bool:
         """True when the model already delivered messages via send_message."""
         return bool(self.sent_message_ids)
-
-    @property
-    def pending_file_ids(self) -> List[str]:
-        """Container outputs not yet delivered via a tool send."""
-        return [fid for fid in self.container_file_ids
-                if fid not in self.consumed_file_ids]
 
 
 class ReactiveEngine:
@@ -249,7 +142,6 @@ class ReactiveEngine:
         rate_limiter: "RateLimiter",
         message_memory: "MessageMemory",
         memory_manager: "MemoryManager",
-        anthropic_api_key: str,
         conversation_logger: "ConversationLogger",
         user_cache: Optional["UserCache"] = None,
     ):
@@ -261,7 +153,6 @@ class ReactiveEngine:
             rate_limiter: Rate limiter instance
             message_memory: Message storage
             memory_manager: Memory tool manager
-            anthropic_api_key: Anthropic API key
             conversation_logger: Conversation logger
             user_cache: User cache for DM channel registry (v0.9)
         """
@@ -275,11 +166,9 @@ class ReactiveEngine:
         # on_ready); feeds the DM prime-context line (v0.9).
         self.list_servers = None
 
-        # Initialize LLM client (Anthropic by default; OpenAI-compatible
-        # endpoint if LLM_PROVIDER=openai_compatible - see core/llm_providers/)
-        from core.llm_providers.factory import build_llm_client, is_anthropic_native
-        self.anthropic = build_llm_client(api_key=anthropic_api_key)
-        self._llm_is_anthropic_native = is_anthropic_native()
+        # Initialize LLM client (OpenAI-compatible endpoint)
+        from core.llm_providers.factory import build_llm_client
+        self.llm = build_llm_client()
 
         # Cache internal config values (v0.6.0 - simplified config)
         self._rate_limiting_config = config.get_rate_limiting_config()
@@ -302,17 +191,9 @@ class ReactiveEngine:
             memory_manager=memory_manager,
         )
 
-        # Web search: all-or-nothing (no rate limiting). Native web search is
-        # Anthropic's server tool; on LLM_PROVIDER=openai_compatible this
-        # instead uses client-side web_search/web_fetch tools backed by
-        # DuckDuckGo (no key required) - see tools/client_web_tools.py.
-        self.web_search_enabled = config.api.web_search.enabled
-        if self.web_search_enabled:
-            logger.info(
-                "Web search enabled (unlimited)"
-                if self._llm_is_anthropic_native else
-                "Web search enabled (client-side, DuckDuckGo)"
-            )
+        # Web search: client-side tools backed by DuckDuckGo (no key required)
+        # - see tools/client_web_tools.py. Always available.
+        self.web_search_enabled = True
 
         # Initialize Discord tool executor (Phase 4)
         # Get user_cache from discord_client once it's set in on_ready
@@ -330,39 +211,13 @@ class ReactiveEngine:
             self.mcp_manager = MCPManager(config_path=Path(mcp_config["config_file"]))
             logger.info("MCP manager initialized")
 
-        # Skills Manager (always enabled - skills require code_execution tool)
-        skills_config = config.get_skills_config()
-        self.skills_manager = SkillsManager(
-            skills_dir=Path(skills_config["skills_dir"]),
-            cache_file=Path(skills_config["cache_file"]),
-            anthropic_api_key=anthropic_api_key
-        )
-        logger.info(f"Skills manager initialized with directory: {skills_config['skills_dir']}")
-
-        # Pass skills_manager to ContextBuilder for skills catalog in system prompt
-        self.context_builder.skills_manager = self.skills_manager
-
-        # Skill Request Executor (v0.5.0 Progressive Disclosure)
-        self.skill_request_executor = SkillRequestExecutor(
-            skills_manager=self.skills_manager,
-            max_skills=self.skills_manager.MAX_SKILLS_PER_REQUEST
-        )
-        logger.info("Skill request executor initialized")
-
         # Unified Attachment Manager (replaces multimedia_processor)
         self.attachment_manager = None  # Initialized in async_initialize
         self.repository_manager = None  # v0.6.1, initialized in async_initialize
 
-        # Files API access for container output delivery. Independent of the
-        # attachments feature: code execution is always available, and the
-        # system prompt promises $OUTPUT_DIR files ride on the reply.
-        self.files_api_client = FilesAPIClient(self.anthropic)
-
-        # Local attachment store + declarative pptx builder. The Files API /
-        # code-execution container are Anthropic-only; under
-        # LLM_PROVIDER=openai_compatible the model creates deliverables via
-        # the client-side create_pptx tool instead, writing into this store
-        # where send_message's attach_outputs can find them.
+        # Local attachment store + declarative pptx builder. The model creates
+        # deliverables via the client-side create_pptx tool, writing into this
+        # store where send_message's attach_outputs can find them.
         self.local_attachment_store = LocalAttachmentStore(bot_id=config.bot_id)
         self.pptx_builder = None
 
@@ -429,7 +284,8 @@ class ReactiveEngine:
                 message_memory=self.message_memory,
                 memory_manager=self.memory_manager,
                 conversation_state_manager=self.conversation_state_manager,
-                anthropic_client=self.anthropic,
+                llm_client=self.llm,
+                default_model=self.config.api.model,
             )
 
         # Initialize MCP Manager (discover tools from servers)
@@ -441,21 +297,11 @@ class ReactiveEngine:
                 logger.error(f"Failed to initialize MCP manager: {e}", exc_info=True)
                 self.mcp_manager = None  # Disable on failure
 
-        # Initialize Skills Manager (scan and upload skills)
-        if self.skills_manager:
-            try:
-                await self.skills_manager.initialize()
-                logger.info("Skills manager initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize Skills manager: {e}", exc_info=True)
-                self.skills_manager = None  # Disable on failure
-
         # Initialize Unified Attachment Manager (replaces multimedia_processor)
         if self.config.attachments.enabled:
             try:
                 self.attachment_manager = UnifiedAttachmentManager(
                     config=self.config,
-                    anthropic_client=self.anthropic,
                     message_memory=self.message_memory
                 )
                 await self.attachment_manager.initialize()
@@ -559,57 +405,12 @@ class ReactiveEngine:
                                     else:
                                         logger.debug(f"Skipped image block for assistant message: {filename}")
 
-                                elif file_data["method"] == "file_id":
-                                    file_id = file_data["data"]
-
-                                    # document/container_upload blocks are only valid in user turns
-                                    if role != "user":
-                                        content_blocks.append({
-                                            "type": "text",
-                                            "text": f"\n[Attachment: {filename}]"
-                                        })
-                                        logger.debug(f"Skipped file block for assistant message: {filename}")
-
-                                    # Add document block for reading (if eligible)
-                                    elif file_data.get("use_as_document_block", True):
-                                        attachment_ids.append(attachment_id)
-                                        # Add text indicator for visibility
-                                        content_blocks.append({
-                                            "type": "text",
-                                            "text": f"\n[Document: {filename}]"
-                                        })
-                                        # Add document block (Files API format)
-                                        content_blocks.append({
-                                            "type": "document",
-                                            "source": {
-                                                "type": "file",
-                                                "file_id": file_id
-                                            }
-                                        })
-                                        logger.debug(f"Loaded document {filename} from DB")
-
-                                    # Add container_upload block (matches periodic path behavior)
-                                    else:
-                                        # Phase 2.2: Check expiration and re-upload if needed
-                                        if local_path:
-                                            fresh_file_id = await self.attachment_manager._handle_container_upload_expiration(
-                                                attachment_id=attachment_id,
-                                                file_id=file_id,
-                                                local_path=local_path,
-                                                filename=filename
-                                            )
-                                            if fresh_file_id:
-                                                file_id = fresh_file_id
-                                            else:
-                                                logger.error(f"Failed to verify/re-upload container_upload {filename}, skipping")
-                                                continue  # Skip this attachment
-
-                                        attachment_ids.append(attachment_id)
-                                        content_blocks.append({
-                                            "type": "container_upload",
-                                            "file_id": file_id
-                                        })
-                                        logger.debug(f"Loaded container_upload file {filename} from DB")
+                                else:
+                                    content_blocks.append({
+                                        "type": "text",
+                                        "text": f"\n[Attachment: {filename}]"
+                                    })
+                                    logger.debug(f"Recorded non-image attachment: {filename}")
 
                         except Exception as e:
                             logger.warning(f"Failed to load attachment {attachment_id} ({filename}): {e}")
@@ -686,76 +487,9 @@ class ReactiveEngine:
         lines += [
             "",
             "Retrieve any 'not in context' file with the discord tool: get_attachment + attachment_id.",
-            "Spreadsheets and large files are processed via code execution; container files are",
-            "mounted at the INPUT_DIR env var and are EPHEMERAL - read them in the same turn.",
             "</attachments_index>",
         ]
         return "\n".join(lines)
-
-    async def _recover_stale_file_in_state(self, conversation_state, file_id: str) -> bool:
-        """
-        A file_id embedded in persisted conversation state 404'd at the API
-        (file expired or deleted server-side). Re-upload from local storage and
-        swap the id in place; if unrecoverable, strip the blocks so the channel
-        unbricks. Returns True if the state changed.
-        """
-        new_file_id = None
-        if self.attachment_manager:
-            try:
-                async with self.attachment_manager.attachment_db.db.execute(
-                    "SELECT attachment_id, filename, local_path FROM attachments "
-                    "WHERE file_id = ?", (file_id,)
-                ) as cursor:
-                    row = await cursor.fetchone()
-                if row and row[2]:
-                    new_file_id = await self.attachment_manager._handle_file_expiration(
-                        attachment_id=row[0], file_id=file_id,
-                        local_path=row[2], filename=row[1],
-                    )
-            except Exception as e:
-                logger.error(f"Stale-file recovery lookup failed for {file_id}: {e}")
-
-        touched = conversation_state.swap_file_id(file_id, new_file_id)
-        if touched:
-            action = f"swapped to {new_file_id}" if new_file_id else "stripped"
-            logger.warning(
-                f"Recovered stale file {file_id} in conversation state: "
-                f"{touched} block(s) {action}"
-            )
-            await self.conversation_state_manager.save(conversation_state)
-        return touched > 0
-
-    @staticmethod
-    def _stale_file_id_from_error(error: Exception) -> Optional[str]:
-        """Extract the file id from a 'File `file_xxx` not found.' API error."""
-        match = re.search(r"File `(file_[A-Za-z0-9]+)` not found", str(error))
-        return match.group(1) if match else None
-
-    async def _container_files_for_discord(self, file_ids: list) -> list:
-        """
-        Download container-created files and wrap them as discord.File objects
-        so deliverables (pptx, charts, ...) ride on the bot's reply.
-        """
-        if not file_ids:
-            return []
-
-        files = []
-        seen_digests = set()  # the same output can surface under two file_ids
-        for file_id in dict.fromkeys(file_ids):  # dedupe by id, keep order
-            meta = await self.files_api_client.retrieve(file_id)
-            data = await self.files_api_client.content(file_id)
-            if not data:
-                logger.warning(f"Could not download container output {file_id}, skipping")
-                continue
-            filename = (meta or {}).get("filename") or f"{file_id}.bin"
-            digest = hashlib.sha256(data).digest()
-            if digest in seen_digests:
-                logger.info(f"Skipping duplicate container output {filename} ({file_id}: identical bytes)")
-                continue
-            seen_digests.add(digest)
-            files.append(discord.File(io.BytesIO(data), filename=filename))
-            logger.info(f"Container output ready for Discord: {filename} ({len(data)} bytes)")
-        return files[:10]  # Discord cap per message
 
     async def _execute_send_message(self, tool_input: dict,
                                     message: discord.Message,
@@ -782,51 +516,26 @@ class ReactiveEngine:
             except (ValueError, discord.NotFound, discord.HTTPException):
                 notes.append(f"reply target {reply_to} not found - sent standalone")
 
-        # Resolve requested attachments against THIS turn's outputs. Two
-        # sources: (1) Anthropic container output file_ids, and (2) files the
-        # model created via client-side tools (create_pptx on the local store),
-        # which is what openai_compatible mode uses since it has no container.
+        # Resolve requested attachments against files created by client-side
+        # tools (for example create_pptx) in the local output store.
         outgoing_files = []
         matched_local = []
         requested = tool_input.get("attach_outputs") or []
         if requested:
-            available = {}  # filename -> file_id, first occurrence wins
-            for file_id in dict.fromkeys(loop_result.container_file_ids):
-                if file_id in loop_result.consumed_file_ids:
-                    continue
-                meta = await self.files_api_client.retrieve(file_id)
-                filename = (meta or {}).get("filename")
-                if filename and filename not in available:
-                    available[filename] = file_id
-
-            matched_ids = []
-            matched_local = []
             for name in requested:
-                if name in available:
-                    matched_ids.append(available[name])
-                elif self.local_attachment_store.exists(name):
-                    matched_local.append(name)
-                else:
-                    notes.append(
-                        f"'{name}' was NOT found among this turn's "
-                        f"code-execution outputs or created files - "
-                        f"it was not attached"
-                    )
-            outgoing_files = await self._container_files_for_discord(matched_ids)
-            # Local-store files (created outside the container) load straight
-            # from disk - no Files API involved.
-            for name in matched_local:
-                if name in loop_result.consumed_local_files:
+                if not self.local_attachment_store.exists(name):
+                    notes.append(f"'{name}' was NOT found among the files created this turn - it was not attached")
+                elif name in loop_result.consumed_local_files:
                     notes.append(f"'{name}' was already attached in this turn and is not re-attached")
-                    continue
+                else:
+                    matched_local.append(name)
+
+            for name in matched_local:
                 data = await self.local_attachment_store.load(name)
                 if data:
                     outgoing_files.append(discord.File(io.BytesIO(data), filename=name))
                     notes.append(f"attached previously created file '{name}'")
                     loop_result.consumed_local_files.add(name)
-            # Fresh create_pptx output belongs to this turn and will attach on
-            # a later send_message call too, so mark it consumed here.
-            loop_result.consumed_file_ids.update(matched_ids)
 
 
         # Deliver, fragmented texting-style; files ride the first fragment
@@ -869,16 +578,8 @@ class ReactiveEngine:
         return report
 
     def _build_attachment_tool_result(self, result, block_id, conversation_state):
-        """
-        Convert a structured get_attachment result into (tool_result, file_block).
-
-        Images inline into the tool_result (valid content). document /
-        container_upload blocks are NOT valid tool_result content - the file
-        block is returned separately to ride in the same user message after
-        the tool_results, and is persisted as its own annotated user message.
-        """
+        """Convert a structured get_attachment result into a tool_result."""
         content_blocks = [{"type": "text", "text": result["text"]}]
-        file_block = None
         file_data = result["file_data"]
 
         if file_data.get("method") == "base64":
@@ -890,24 +591,12 @@ class ReactiveEngine:
                     "data": file_data["data"],
                 },
             })
-        elif file_data.get("method") == "file_id":
-            if file_data.get("use_as_document_block", True):
-                file_block = {
-                    "type": "document",
-                    "source": {"type": "file", "file_id": file_data["data"]},
-                }
-                content_blocks[0]["text"] += "\nFile attached to the conversation as a readable document."
-            else:
-                file_block = {"type": "container_upload", "file_id": file_data["data"]}
-                content_blocks[0]["text"] += "\nFile loaded for code execution (find it via the INPUT_DIR env var)."
+        elif file_data.get("method") == "local":
+            content_blocks[0]["text"] += (
+                f"\nLocal copy: {file_data.get('data')}"
+            )
 
-            if conversation_state and file_block:
-                att_id = result["metadata"]["attachment_id"]
-                conversation_state.add_message("user", [file_block], [att_id])
-                logger.info(f"Added fetched attachment to conversation state: {result['metadata']['filename']}")
-
-        tool_result = {"type": "tool_result", "tool_use_id": block_id, "content": content_blocks}
-        return tool_result, file_block
+        return {"type": "tool_result", "tool_use_id": block_id, "content": content_blocks}, None
 
     # ========== SHARED RESPONSE PIPELINE ==========
 
@@ -1085,26 +774,14 @@ class ReactiveEngine:
     def _build_api_params(self, system_blocks: list, conversation_state, context,
                           is_dm: bool = False) -> dict:
         """
-        Assemble the Messages API request shared by both response paths:
-        tool registry, beta headers, message history, skills container,
-        thinking and effort. The skills catalog joins the cached system
-        prefix (it changes only when active skills change).
+        Assemble the chat request shared by both response paths: tool
+        registry and message history.
 
         is_dm (v0.9): DM requests don't get ask_prime - a DM already IS the
-        Prime. Tool sets stay stable per channel, so the cache holds.
+        Prime. Tool sets stay stable per channel.
         """
-        if self.skills_manager and conversation_state:
-            skills_prompt = self.context_builder.build_skills_prompt(
-                conversation_state.get_active_skills()
-            )
-            if skills_prompt:
-                system_blocks[0]["text"] += "\n\n" + skills_prompt
-
-        if self._llm_is_anthropic_native:
-            tools = [{"type": "memory_20250818", "name": "memory"}]
-        else:
-            from .memory_tool_executor import MEMORY_TOOL_SCHEMA
-            tools = [MEMORY_TOOL_SCHEMA]
+        from .memory_tool_executor import MEMORY_TOOL_SCHEMA
+        tools = [MEMORY_TOOL_SCHEMA]
 
         if self.discord_tool_executor:
             tools.extend(get_discord_tools())
@@ -1140,15 +817,9 @@ class ReactiveEngine:
         tools.append(get_add_reaction_tool())
         tools.append(get_remove_reaction_tool())
 
-        beta_headers = []
-        if self.web_search_enabled and self._llm_is_anthropic_native:
-            web_search_config = self.config.get_web_search_config()
-            tools.extend(get_web_search_tools(citations_enabled=web_search_config["citations_enabled"]))
-        elif self.web_search_enabled:
-            # LLM_PROVIDER=openai_compatible: no native server tool, so
-            # web_search/web_fetch are client-side function tools instead -
-            # see tools/client_web_tools.py and the dispatch in
-            # _dispatch_tool_calls (block.name == "web_search"/"web_fetch").
+        if self.web_search_enabled:
+            # Client-side web tools - see tools/client_web_tools.py and the
+            # dispatch in _dispatch_tool_calls.
             from tools.client_web_tools import WEB_SEARCH_TOOL, WEB_FETCH_TOOL
             tools.append(WEB_SEARCH_TOOL)
             tools.append(WEB_FETCH_TOOL)
@@ -1159,28 +830,13 @@ class ReactiveEngine:
                 tools.extend(mcp_tools)
                 logger.debug(f"Added {len(mcp_tools)} MCP tools to API request")
 
-        # Skills REQUIRE code_execution: skill files load into the container.
-        # Anthropic native only - the container has no OpenAI-compatible
-        # equivalent (it's dropped from the outgoing request with a warning).
-        if self.skills_manager and self._llm_is_anthropic_native:
-            tools.append({"type": "code_execution_20260120", "name": "code_execution"})
-            tools.append(get_skill_request_tool())
-            beta_headers.append("skills-2025-10-02")
-        elif self.skills_manager:
-            # OpenAI-compatible: no container, no code_execution, no Files API.
-            # Deliver the pptx built-in-skill capability as a client-side
-            # declarative tool instead - create_pptx builds the file in-process
-            # into the local attachment store, where send_message can ship it.
-            from tools.pptx_tools import get_create_pptx_tool
-            from tools.pptx_tools import PptxBuilder
-            if self.pptx_builder is None:
-                self.pptx_builder = PptxBuilder(self.local_attachment_store)
-            tools.append(get_create_pptx_tool())
-
-        # Persisted state may carry file_id references even when fresh
-        # uploads are disabled, so the beta rides whenever the manager exists
-        if self.attachment_manager:
-            beta_headers.append("files-api-2025-04-14")
+        # Declarative PowerPoint generation - create_pptx builds the file
+        # in-process into the local attachment store, where send_message can
+        # ship it.
+        from tools.pptx_tools import get_create_pptx_tool, PptxBuilder
+        if self.pptx_builder is None:
+            self.pptx_builder = PptxBuilder(self.local_attachment_store)
+        tools.append(get_create_pptx_tool())
 
         if conversation_state:
             messages = conversation_state.get_messages_for_api()
@@ -1199,54 +855,17 @@ class ReactiveEngine:
             "system": system_blocks,
             "messages": messages,
             "tools": tools,
-            "betas": beta_headers  # SDK's beta endpoint uses 'betas' parameter, not extra_headers
         }
-
-        # Skills container with progressive disclosure (v0.5.0)
-        if self.skills_manager:
-            active_skill_names = conversation_state.get_active_skills() if conversation_state else []
-            if not active_skill_names:
-                active_skill_names = self.config.skills.default_skills
-                if conversation_state:
-                    conversation_state.set_active_skills(
-                        active_skill_names, self.skills_manager.MAX_SKILLS_PER_REQUEST
-                    )
-            skills_list = self.skills_manager.select_skills(active_skill_names)
-            if skills_list:
-                api_params["container"] = {"skills": skills_list}
-                logger.debug(f"Container skills: {active_skill_names}")
-
-        # Adaptive thinking and effort if configured
-        if self.config.api.thinking.enabled:
-            api_params["thinking"] = {"type": "adaptive"}
-        if self.config.api.effort:
-            api_params["output_config"] = {"effort": self.config.api.effort}
 
         return api_params
 
     def _log_response_blocks(self, response, log_suffix: str = "") -> None:
-        """Verbose per-block debug logging (active only with web search on)."""
-        if not self.web_search_enabled:
-            return
+        """Verbose per-block debug logging."""
         logger.debug(f"Response has {len(response.content)} content blocks{log_suffix}")
         for i, block in enumerate(response.content):
             logger.debug(f"  Block {i}: type={block.type}")
-
             if hasattr(block, 'text'):
                 logger.debug(f"    Text preview: {block.text[:200]}")
-
-            if block.type == "container_upload":
-                logger.debug(f"    container_upload: file_id={getattr(block, 'file_id', 'unknown')}, "
-                             f"filename={getattr(block, 'filename', 'unknown')}")
-
-            if block.type == "web_fetch_tool_result":
-                if hasattr(block, 'content') and hasattr(block.content, 'content'):
-                    if hasattr(block.content.content, 'source') and hasattr(block.content.content.source, 'data'):
-                        logger.debug(f"    web_fetch content: {block.content.content.source.data[:500]}")
-
-            if block.type == "server_tool_use" and hasattr(block, 'name'):
-                logger.info(f"Server tool used{log_suffix}: {block.name}")
-                logger.debug(f"  Server tool {block.name} input: {block.input}")
 
     # ------------------------------------------------------------------
     # Turn events (v0.9): structured rows in messages.db, one per bot
@@ -1266,7 +885,7 @@ class ReactiveEngine:
         usage = result.usage
         return {
             "triggers": triggers,
-            "thinking": result.thinking_text or "",
+            "thinking": "",
             "tool_calls": result.tool_calls,
             "response": result.response_text or None,
             "tokens": {
@@ -1296,18 +915,17 @@ class ReactiveEngine:
             logger.exception(f"Turn-event emit failed ({kind})")
 
     async def _execute_tool_blocks(self, response, message: discord.Message,
-                                   conversation_state, api_params: dict,
-                                   container_file_ids: list = None,
+                                   conversation_state,
                                    tool_calls_log: list = None,
                                    memory_write_grant: Optional[str] = None,
                                    loop_result: Optional[ToolLoopResult] = None):
         """
         Execute the client-side tool_use blocks in a response.
 
-        Returns (tool_results, pending_file_blocks, container_rebuilt):
-        pending_file_blocks are document/container_upload blocks from
-        get_attachment that ride in the same user message AFTER the results;
-        container_rebuilt signals request_skill replaced the skills container.
+        Returns (tool_results, pending_file_blocks). pending_file_blocks are
+        attachment blocks from get_attachment that ride in the same user
+        message after the results.
+
         tool_calls_log (v0.9): caller-owned accumulator; every dispatched
         block lands there as {tool, action, detail} and (memory excepted -
         it has its richer line) in the conversations log.
@@ -1317,7 +935,6 @@ class ReactiveEngine:
 
         tool_results = []
         pending_file_blocks = []
-        container_rebuilt = False
 
         def note(tool: str, action: str, detail: str = ""):
             detail = detail[:120]
@@ -1347,43 +964,6 @@ class ReactiveEngine:
                 )
                 self.conversation_logger.log_memory_tool(command, path, result)
                 note("memory", command, path)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result
-                })
-
-            # Progressive disclosure (v0.5.0)
-            elif block.name == "request_skill":
-                logger.info(f"Executing request_skill tool: {block.input.get('skill_name', 'unknown')}")
-                note("skills", "request_skill", block.input.get("skill_name", ""))
-                if self.message_memory:
-                    await self.message_memory.add_event(
-                        "skill", server_id, channel_id,
-                        {
-                            "triggers": [], "thinking": "", "tool_calls": [],
-                            "response": None,
-                            "skill_name": block.input.get("skill_name", ""),
-                            "replace": block.input.get("replace"),
-                        },
-                    )
-                if conversation_state:
-                    result = self.skill_request_executor.execute(block.input, conversation_state)
-                    await self.conversation_state_manager.save(conversation_state)
-                    # Rebuild container so the NEXT iteration ships the new
-                    # skill set; skills load at container creation, so the id
-                    # is dropped to force a fresh container (files written in
-                    # the old container are lost; message container_upload
-                    # blocks re-mount automatically)
-                    new_skills = self.skills_manager.select_skills(
-                        conversation_state.get_active_skills()
-                    )
-                    if new_skills:
-                        api_params["container"] = {"skills": new_skills}
-                        container_rebuilt = True
-                else:
-                    result = "Error: Conversation state not available"
-
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -1423,7 +1003,6 @@ class ReactiveEngine:
                     result = await self.repository_manager.execute(
                         block.input, current_server_id=server_id,
                         current_channel_id=channel_id,
-                        container_file_ids=container_file_ids,
                     )
                 else:
                     result = "Error: repository feature not enabled"
@@ -1548,7 +1127,7 @@ class ReactiveEngine:
                         "is_error": True
                     })
 
-        return tool_results, pending_file_blocks, container_rebuilt
+        return tool_results, pending_file_blocks
 
     async def _run_tool_loop(
         self,
@@ -1561,7 +1140,7 @@ class ReactiveEngine:
         memory_write_grant: Optional[str] = None,
     ) -> ToolLoopResult:
         """
-        Drive the Claude API tool-use loop to completion (both response paths).
+        Drive the model API tool-use loop to completion (both response paths).
 
         fallback_text marks a must-reply path: the result text is never empty
         (loop overruns, blank replies, and unexpected stops degrade to it).
@@ -1574,8 +1153,6 @@ class ReactiveEngine:
         conversation prefix. It is never persisted.
         """
         result = ToolLoopResult()
-        container_id = None
-        recovered_file_ids = set()  # stale file_ids already recovered this turn
         loop_iteration = 0
         attachment_nudges = 0  # phantom-attachment guard, max 2 bounces per turn
         repeat_sig = None  # repeat-call guard: identical consecutive tool calls
@@ -1588,41 +1165,18 @@ class ReactiveEngine:
         while True:
             loop_iteration += 1
 
-            logger.debug(f"API params{log_suffix}: model={api_params.get('model')}, betas={api_params.get('betas')}")
+            logger.debug(f"API params{log_suffix}: model={api_params.get('model')}")
             logger.debug(f"  Tools: {[t.get('name') or t.get('type') for t in api_params.get('tools', [])]}")
-            if 'container' in api_params:
-                logger.debug(f"  Container/Skills: {api_params.get('container')}")
 
-            try:
-                # Streamed so large max_tokens are allowed (the SDK refuses a
-                # non-streaming request it estimates could exceed 10 minutes).
-                # Accumulated to the same Message object create() would return.
-                async with self.anthropic.beta.messages.stream(
-                    **{
-                        **api_params,
-                        "messages": with_message_cache_breakpoint(api_params["messages"]) + tail_messages,
-                    }
-                ) as api_stream:
-                    response = await api_stream.get_final_message()
-            except NotFoundError as e:
-                # Stale file_id in persisted state 404s the whole request
-                stale_id = self._stale_file_id_from_error(e)
-                if (stale_id and conversation_state
-                        and stale_id not in recovered_file_ids):
-                    recovered_file_ids.add(stale_id)
-                    if await self._recover_stale_file_in_state(conversation_state, stale_id):
-                        api_params["messages"] = conversation_state.get_messages_for_api()
-                        continue
-                raise
+            async with self.llm.beta.messages.stream(
+                **{
+                    **api_params,
+                    "messages": api_params["messages"] + tail_messages,
+                }
+            ) as api_stream:
+                response = await api_stream.get_final_message()
 
             result.usage = getattr(response, "usage", None)
-
-            # Multi-iteration turns must reuse the container (per Anthropic docs)
-            if getattr(response, "container", None) and getattr(response.container, "id", None):
-                container_id = response.container.id
-
-            # Collect files written by code execution for Discord delivery
-            result.container_file_ids.extend(collect_container_output_file_ids(response))
 
             self.conversation_logger.log_tool_use_loop(loop_iteration, response.stop_reason)
             self._log_response_blocks(response, log_suffix)
@@ -1635,12 +1189,6 @@ class ReactiveEngine:
                     f"cache_write: {getattr(result.usage, 'cache_creation_input_tokens', 0) or 0:,})"
                 )
 
-            # Extract thinking (full block kept for persistence with signature)
-            for block in response.content:
-                if block.type == "thinking":
-                    result.thinking_text += block.thinking
-                    result.thinking_block = block
-
             if response.stop_reason == "tool_use":
                 # Safety cap: a model that keeps requesting tools must not loop unbounded
                 if loop_iteration >= MAX_TOOL_LOOP_ITERATIONS:
@@ -1650,9 +1198,8 @@ class ReactiveEngine:
                     break
                 result.tools_were_used = True
 
-                tool_results, pending_file_blocks, container_rebuilt = await self._execute_tool_blocks(
-                    response, message, conversation_state, api_params,
-                    container_file_ids=result.container_file_ids,
+                tool_results, pending_file_blocks = await self._execute_tool_blocks(
+                    response, message, conversation_state,
                     tool_calls_log=result.tool_calls,
                     memory_write_grant=memory_write_grant,
                     loop_result=result,
@@ -1712,23 +1259,6 @@ class ReactiveEngine:
                     except Exception as e:
                         logger.error(f"Failed to persist tool results to conversation state{log_suffix}: {e}", exc_info=True)
 
-                # A container_upload fetched mid-loop only mounts into a NEW
-                # container (files mount at creation) - drop the captured id
-                # so the next iteration rebuilds with every file block in
-                # messages (same trade as request_skill: old container files
-                # are lost, message blocks re-mount)
-                if any(
-                    isinstance(b, dict) and b.get("type") == "container_upload"
-                    for b in pending_file_blocks
-                ):
-                    container_rebuilt = True
-
-                if container_rebuilt:
-                    container_id = None  # force a fresh container
-                    api_params.get("container", {}).pop("id", None)
-                if container_id and self.skills_manager and 'container' in api_params:
-                    api_params["container"]["id"] = container_id
-
                 continue
 
             elif response.stop_reason == "end_turn":
@@ -1765,7 +1295,7 @@ class ReactiveEngine:
                 # trusts its own claim next turn. Bounce up to twice with
                 # escalating notes; a third strike never ships the claim on
                 # the periodic path (silence beats a lie).
-                if (result.response_text and not result.container_file_ids
+                if (result.response_text and not self.local_attachment_store.list_files()
                         and not result.did_send
                         and re.search(r"\battach(?:ed|ment|ments|ing)?\b",
                                       result.response_text, re.IGNORECASE)):
@@ -1776,7 +1306,7 @@ class ReactiveEngine:
                                 "<system_note>Your reply mentions an attached file, "
                                 "but no files are queued to send with this message - "
                                 "nothing will be attached. Files only exist if created "
-                                "by code execution during THIS turn, and the reliable "
+                                "by a file tool (for example create_pptx) during THIS turn, and the reliable "
                                 "way to deliver one is the send_message tool with "
                                 "attach_outputs. Either actually produce the file now, "
                                 "or reword your reply so it doesn't claim an "
@@ -1854,32 +1384,26 @@ class ReactiveEngine:
         self,
         channel,
         response_text: str,
-        container_file_ids: list,
         result: Optional["ToolLoopResult"] = None,
         reference: Optional[discord.Message] = None,
     ) -> Optional[discord.Message]:
         """
         Send a response to Discord, split to the message-length limit, with
-        container-created deliverables riding on the first chunk.
-
-        Also attaches files the model created via client-side tools on
-        the local attachment store (create_pptx, on openai_compatible
-        mode) that have not yet been sent.
+        files from the local output store riding on the first chunk.
 
         Returns the last successfully sent message, or None if the first
         chunk could not be delivered at all.
         """
         from .discord_client import fragment_message
         message_chunks = fragment_message(response_text)
-        outgoing_files = await self._container_files_for_discord(container_file_ids)
+        outgoing_files = []
 
         # Attach files created by client-side tools that are still
         # pending delivery (not yet sent this turn or via send_message).
         consumed = result.consumed_local_files if result else set()
         local_filenames = [
             fn for fn in self.local_attachment_store.list_files()
-            if fn not in [f.filename for f in outgoing_files]
-            and fn not in consumed
+            if fn not in consumed
         ]
         for name in local_filenames:
             data = await self.local_attachment_store.load(name)
@@ -1909,9 +1433,9 @@ class ReactiveEngine:
                     try:
                         logger.warning(f"Failed to send reply, trying standalone: {e}")
                         # discord.File objects are single-use; rebuild for the retry
-                        outgoing_files = await self._container_files_for_discord(container_file_ids)
+                        outgoing_files = []
                         for name in self.local_attachment_store.list_files():
-                            if name not in [f.filename for f in outgoing_files] and name not in result.consumed_local_files:
+                            if name not in result.consumed_local_files:
                                 data = await self.local_attachment_store.load(name)
                                 if data:
                                     outgoing_files.append(discord.File(io.BytesIO(data), filename=name))
@@ -1946,13 +1470,6 @@ class ReactiveEngine:
             return
         try:
             assistant_content = []
-            if result.thinking_block:
-                # Preserve thinking block with signature for next turn
-                assistant_content.append({
-                    "type": "thinking",
-                    "thinking": result.thinking_block.thinking,
-                    "signature": result.thinking_block.signature
-                })
             if result.response_text:
                 assistant_content.append({"type": "text", "text": result.response_text})
 
@@ -2051,7 +1568,7 @@ class ReactiveEngine:
             rate_limit_stats=self.rate_limiter.get_stats(channel_id)
         )
 
-        logger.info(f"Calling Claude API for @mention from {message.author.name}")
+        logger.info(f"Calling model API for @mention from {message.author.name}")
 
         try:
             # Context is built inside the semaphore so each message gets isolated context
@@ -2078,12 +1595,11 @@ class ReactiveEngine:
                 async with message.channel.typing():
                     await asyncio.sleep(1.5)  # small delay for a more natural feel
 
-                    # One cached system block; per-request context rides the
-                    # volatile tail so it never breaks the cached prefix
+                    # System prompt block; per-request context rides the
+                    # volatile tail.
                     system_blocks = [{
                         "type": "text",
                         "text": context["system_prompt"],
-                        "cache_control": {"type": "ephemeral"}
                     }]
                     volatile_tail = await self._build_volatile_tail(
                         context.get("time_context", ""), conversation_state, message
@@ -2118,7 +1634,7 @@ class ReactiveEngine:
             sent_message = None
             if result.response_text.strip():
                 sent_message = await self._send_response_chunks(
-                    message.channel, result.response_text, result.pending_file_ids,
+                    message.channel, result.response_text,
                     result,
                     reference=message,
                 )
@@ -2127,8 +1643,6 @@ class ReactiveEngine:
                     return
 
             # Log thinking trace (if present) and bot response
-            if result.thinking_text:
-                self.conversation_logger.log_thinking(result.thinking_text, len(result.thinking_text))
             self.conversation_logger.log_bot_response(
                 result.response_text or f"[Sent {len(result.sent_message_ids)} message(s) via send_message]",
                 len(result.response_text))
@@ -2149,8 +1663,8 @@ class ReactiveEngine:
             )
 
         except Exception as e:
-            logger.error(f"Error calling Claude API: {e}", exc_info=True)
-            self.conversation_logger.log_error(f"Claude API error: {str(e)}")
+            logger.error(f"Error calling model API: {e}", exc_info=True)
+            self.conversation_logger.log_error(f"model API error: {str(e)}")
             self.conversation_logger.log_separator()
             await message.channel.send(
                 f"{message.author.mention} Sorry, I encountered an error processing your request."
@@ -2215,7 +1729,6 @@ class ReactiveEngine:
                 system_blocks = [{
                     "type": "text",
                     "text": context["system_prompt"],
-                    "cache_control": {"type": "ephemeral"}
                 }]
                 volatile_tail = await self._build_volatile_tail(
                     context.get("time_context", ""), conversation_state, synthetic)
@@ -2232,11 +1745,8 @@ class ReactiveEngine:
                 )
 
             if result.response_text.strip():
-                await self._send_response_chunks(channel, result.response_text,
-                                                 result.pending_file_ids, result)
+                await self._send_response_chunks(channel, result.response_text, result)
 
-            if result.thinking_text:
-                self.conversation_logger.log_thinking(result.thinking_text, len(result.thinking_text))
             self.conversation_logger.log_bot_response(result.response_text, len(result.response_text))
 
             await self._persist_assistant_response(conversation_state, channel_id, result, seed_epoch)
@@ -2621,9 +2131,9 @@ class ReactiveEngine:
         momentum = await self._calculate_conversation_momentum(channel_id)
         context["conversation_momentum"] = momentum
 
-        # Call Claude API with response decision focus
+        # Call model API with response decision focus
         # Note: Message already in conversation state from Phase 1 processing
-        await self._call_claude_for_response_decision(latest_message, context, triggers)
+        await self._call_model_for_response_decision(latest_message, context, triggers)
 
     async def _calculate_conversation_momentum(self, channel_id: str) -> str:
         """
@@ -2671,10 +2181,10 @@ class ReactiveEngine:
             logger.error(f"Error calculating momentum for {channel_id}: {e}", exc_info=True)
             return "cold"
 
-    async def _call_claude_for_response_decision(self, message: discord.Message, context,
+    async def _call_model_for_response_decision(self, message: discord.Message, context,
                                                  triggers: list = None):
         """
-        Call Claude API to decide if bot should respond and generate response if yes.
+        Call model API to decide if bot should respond and generate response if yes.
 
         Args:
             message: Discord message object (latest in channel)
@@ -2733,14 +2243,12 @@ class ReactiveEngine:
                     volatile_tail=volatile_tail, log_suffix=" (periodic)",
                 )
 
-                # Empty text and no tool sends = Claude decided to stay silent
+                # Empty text and no tool sends = model decided to stay silent
                 if not result.response_text.strip() and not result.did_send:
                     if result.tools_were_used:
-                        logger.warning(f"Claude used tools but returned no text response in channel {channel_id}")
+                        logger.warning(f"model used tools but returned no text response in channel {channel_id}")
                     else:
-                        logger.info(f"Claude decided not to respond in channel {channel_id}")
-                    if result.thinking_text:
-                        self.conversation_logger.log_thinking(result.thinking_text, len(result.thinking_text))
+                        logger.info(f"model decided not to respond in channel {channel_id}")
                     self.conversation_logger.log_bot_response("[No response - staying silent]", 0)
                     self.conversation_logger.log_separator()
                     await self._emit_turn_event(
@@ -2771,8 +2279,6 @@ class ReactiveEngine:
                         pass  # can't verify; send anyway
 
                 # Log thinking trace (if present) and bot response
-                if result.thinking_text:
-                    self.conversation_logger.log_thinking(result.thinking_text, len(result.thinking_text))
                 self.conversation_logger.log_bot_response(
                     result.response_text or f"[Sent {len(result.sent_message_ids)} message(s) via send_message]",
                     len(result.response_text))
@@ -2781,7 +2287,7 @@ class ReactiveEngine:
                 sent_message = None
                 if result.response_text.strip():
                     sent_message = await self._send_response_chunks(
-                        message.channel, result.response_text, result.pending_file_ids,
+                        message.channel, result.response_text,
                         result,
                     )
                     if sent_message is None and not result.did_send:
@@ -2803,7 +2309,7 @@ class ReactiveEngine:
                 logger.info(f"Periodic response sent in channel {channel_id} ({len(result.response_text)} chars)")
 
             except Exception as e:
-                logger.error(f"Error calling Claude for periodic check: {e}", exc_info=True)
+                logger.error(f"Error calling model for periodic check: {e}", exc_info=True)
                 self.conversation_logger.log_error(f"Periodic check error: {str(e)}")
                 self.conversation_logger.log_separator()
             finally:
@@ -2827,7 +2333,7 @@ class ReactiveEngine:
             context: Context package from ContextBuilder
 
         Returns:
-            System prompt list for Claude API
+            System prompt list for model API
         """
         bot_name = self.discord_client.user.display_name if self.discord_client else "Assistant"
 
@@ -2885,7 +2391,6 @@ DO NOT explain your reasoning for responding or not responding. DO NOT output me
             {
                 "type": "text",
                 "text": context["system_prompt"] + decision_criteria,
-                "cache_control": {"type": "ephemeral"}
             }
         ]
 

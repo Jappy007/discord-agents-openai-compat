@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Status:** Pre-release (beta).
 
 ### Changed
+- **OpenAI-compatible endpoints are now the only provider.** The native
+  Anthropic client and every feature that only existed as an Anthropic
+  server-side capability were removed: code execution / skills containers,
+  the Files API, the Batches API and the weekly memory-reconsolidation pass,
+  server induction, native web search / fetch, extended thinking / effort,
+  and prompt caching. Configuration now uses `OPENAI_API_KEY`,
+  `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_MAX_OUTPUT_TOKENS`, and
+  `OPENAI_UTILITY_MODEL`; `LLM_PROVIDER` and `ANTHROPIC_API_KEY` are gone.
+  Client-side function tooling is unaffected: vision attachments, memory,
+  MCP tools, client-side web search / fetch, and `create_pptx` continue to
+  work. See `OPENAI_COMPATIBILITY.md` for the full supported/unsupported
+  matrix.
 - **Backfill runs once, then only fills offline gaps.** Each channel's first
   successful backfill now records a persistent completion marker in the
   message database. Subsequent boots fetch only messages newer than the last
