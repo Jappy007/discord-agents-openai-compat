@@ -120,6 +120,12 @@ class ToolLoopResult:
     sent_message_ids: List[str] = field(default_factory=list)
     last_sent_message: Any = None  # discord.Message, for engagement tracking
     consumed_local_files: set = field(default_factory=set)  # local attachments, don't re-send
+    # Explicit silence: the model called stay_silent. Any final text is
+    # private reasoning and must never be posted.
+    stayed_silent: bool = False
+    # Reaction-only decision: add_reaction is the whole response. The turn
+    # ends silently - no text is posted after it.
+    reaction_used: bool = False
 
     @property
     def did_send(self) -> bool:
@@ -802,8 +808,11 @@ class ReactiveEngine:
             tools.append(ASK_PRIME_TOOL)
 
         # Native messaging (v0.12.0): deliberate mid-turn sends
-        from tools.send_message import SEND_MESSAGE_TOOL
+        from tools.send_message import SEND_MESSAGE_TOOL, STAY_SILENT_TOOL
         tools.append(SEND_MESSAGE_TOOL)
+        # Explicit silence: when the model has nothing to say, it calls this
+        # instead of emitting text that would otherwise be posted.
+        tools.append(STAY_SILENT_TOOL)
 
         # Reaction tools
         from tools.reaction_tools import get_reaction_tools
@@ -1066,6 +1075,24 @@ class ReactiveEngine:
                     "content": result
                 })
 
+            # Explicit silence: the model is choosing not to speak. Mark the
+            # turn so the loop discards final text (private reasoning) instead
+            # of posting it to the channel.
+            elif block.name == "stay_silent":
+                reason = (block.input.get("reason") or "").strip()
+                note("stay_silent", "silence", reason[:120])
+                if loop_result is not None:
+                    loop_result.stayed_silent = True
+                result = (
+                    "Acknowledged - nothing will be posted this turn. End your "
+                    "turn now and do not write any text."
+                )
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+
             elif block.name == "web_search":
                 from tools.client_web_tools import execute_web_search
                 query = block.input.get("query", "")
@@ -1092,6 +1119,11 @@ class ReactiveEngine:
                 from tools.reaction_tools import execute_reaction_tool
                 note("reaction", block.name, kv(block.input))
                 result = await execute_reaction_tool(block.name, block.input, message)
+                # A successful reaction is a complete response: the model
+                # chose to acknowledge without words. End the turn silently.
+                if (block.name == "add_reaction" and loop_result is not None
+                        and result.startswith("Reacted")):
+                    loop_result.reaction_used = True
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -1197,7 +1229,8 @@ class ReactiveEngine:
                 # Safety cap: a model that keeps requesting tools must not loop unbounded
                 if loop_iteration >= MAX_TOOL_LOOP_ITERATIONS:
                     logger.warning(f"Tool use loop exceeded {MAX_TOOL_LOOP_ITERATIONS} iterations{log_suffix}")
-                    if fallback_text and not result.did_send:
+                    if (fallback_text and not result.did_send
+                            and not result.stayed_silent and not result.reaction_used):
                         result.response_text = result.response_text or "I got stuck in a tool loop - try asking again."
                     break
                 result.tools_were_used = True
@@ -1263,6 +1296,14 @@ class ReactiveEngine:
                     except Exception as e:
                         logger.error(f"Failed to persist tool results to conversation state{log_suffix}: {e}", exc_info=True)
 
+                # Explicit silence ends the turn immediately. Anything the
+                # model would have written after stay_silent is private
+                # reasoning, not a message. A reaction is also the whole
+                # response - the turn ends silently after it.
+                if result.stayed_silent or result.reaction_used:
+                    result.response_text = ""
+                    break
+
                 continue
 
             elif response.stop_reason == "end_turn":
@@ -1279,6 +1320,12 @@ class ReactiveEngine:
 
                 if citations_list:
                     result.response_text += "\n\n**Sources:**\n" + "\n".join(f"- {cite}" for cite in citations_list)
+
+                # stay_silent / reaction are the decision. Final text after
+                # either is private reasoning and must never reach the channel.
+                if result.stayed_silent or result.reaction_used:
+                    result.response_text = ""
+                    break
 
                 # Tools ran but the model went quiet: reprompt once for a
                 # brief confirmation (unless it already sent via send_message
@@ -1351,14 +1398,18 @@ class ReactiveEngine:
                         f"bounces on the must-reply path{log_suffix} - shipping anyway"
                     )
 
-                # Must-reply is satisfied by tool sends too (v0.12.0)
-                if not result.response_text and fallback_text and not result.did_send:
+                # Must-reply is satisfied by tool sends too (v0.12.0), and an
+                # explicit stay_silent or reaction overrides it.
+                if (not result.response_text and fallback_text
+                        and not result.did_send and not result.stayed_silent
+                        and not result.reaction_used):
                     result.response_text = fallback_text
                 break
 
             else:
                 logger.warning(f"Unexpected stop_reason{log_suffix}: {response.stop_reason}")
-                if fallback_text and not result.did_send:
+                if (fallback_text and not result.did_send
+                        and not result.stayed_silent and not result.reaction_used):
                     result.response_text = fallback_text
                 break
 
@@ -1631,6 +1682,45 @@ class ReactiveEngine:
                             fallback_text="I'm not sure how to respond to that.",
                             volatile_tail=volatile_tail,
                         )
+
+            # Reaction-only turn: the model acknowledged with an emoji and
+            # the loop discarded any text it wrote afterwards.
+            if result.reaction_used and not result.did_send:
+                self.conversation_logger.log_bot_response(
+                    "[Reacted - staying silent]", 0)
+                self.conversation_logger.log_separator()
+                await self._persist_assistant_response(
+                    conversation_state, channel_id, result, seed_epoch)
+                await self._emit_turn_event(
+                    "reaction",
+                    message, result,
+                    [self._trigger_from(message, addressed=True)],
+                    decision="reaction",
+                )
+                logger.info(
+                    f"Model reacted instead of replying to {message.author.name}"
+                )
+                return
+
+            # Explicit stay_silent: the model chose not to post here. Final
+            # text (if any) was private reasoning and the loop already
+            # cleared it - never send it.
+            if result.stayed_silent and not result.did_send:
+                self.conversation_logger.log_bot_response(
+                    "[No response - stayed silent on request]", 0)
+                self.conversation_logger.log_separator()
+                await self._persist_assistant_response(
+                    conversation_state, channel_id, result, seed_epoch)
+                await self._emit_turn_event(
+                    "silent",
+                    message, result,
+                    [self._trigger_from(message, addressed=True)],
+                    decision="stay_silent",
+                )
+                logger.info(
+                    f"Model stayed silent on @mention from {message.author.name}"
+                )
+                return
 
             # Send response (outside semaphore to allow concurrent API calls
             # while sending). Final text may be empty when the model already
@@ -2247,16 +2337,33 @@ class ReactiveEngine:
                     volatile_tail=volatile_tail, log_suffix=" (periodic)",
                 )
 
+                # Reaction-only decision: it acknowledged with an emoji, and
+                # any text it wrote afterwards was discarded by the loop.
+                if result.reaction_used and not result.did_send:
+                    logger.info(f"model reacted instead of replying in channel {channel_id}")
+                    self.conversation_logger.log_bot_response("[Reacted - staying silent]", 0)
+                    self.conversation_logger.log_separator()
+                    await self._persist_assistant_response(
+                        conversation_state, channel_id, result, seed_epoch)
+                    await self._emit_turn_event(
+                        "reaction", message, result, triggers,
+                        scan_count=len(triggers), decision="reaction")
+                    self._responded_messages.append(message.id)
+                    return
+
                 # Empty text and no tool sends = model decided to stay silent
                 if not result.response_text.strip() and not result.did_send:
-                    if result.tools_were_used:
+                    if result.stayed_silent:
+                        logger.info(f"model explicitly stayed silent in channel {channel_id}")
+                    elif result.tools_were_used:
                         logger.warning(f"model used tools but returned no text response in channel {channel_id}")
                     else:
                         logger.info(f"model decided not to respond in channel {channel_id}")
                     self.conversation_logger.log_bot_response("[No response - staying silent]", 0)
                     self.conversation_logger.log_separator()
                     await self._emit_turn_event(
-                        "silent", message, result, triggers, scan_count=len(triggers))
+                        "silent", message, result, triggers, scan_count=len(triggers),
+                        decision="stay_silent" if result.stayed_silent else "none")
                     self._responded_messages.append(message.id)
                     return
 
@@ -2381,12 +2488,12 @@ Your personality and base prompt guide whether to participate. Consider relevanc
 
 **RESPONSE FORMAT:**
 - If you decide to respond with text: Output ONLY your message to the channel (no meta-commentary, no explanation of your decision)
-- If you decide NOT to respond with text but still want to acknowledge: call `add_reaction` with an appropriate emoji, then output nothing
-- If you decide NOT to respond at all: Output ABSOLUTELY NOTHING (not even an explanation - complete silence)
+- If you decide NOT to respond with text but still want to acknowledge: call `add_reaction` with an appropriate emoji. A reaction is the whole response - end your turn silently, do not also write text or call send_message
+- If you decide NOT to respond at all: call `stay_silent` with a short private reason, then end your turn. Do NOT output any text - plain text at the end of your turn is posted to the channel, so any reasoning or explanation you write there becomes a visible message
 - When your response answers ONE specific message in a batch of several, prefer the send_message tool with reply_to_message_id so it lands anchored to that message
 - send_message can be called more than once in a turn (messages arrive in order) - e.g. an anchored reply to one person, then a separate message for the others. If you've sent everything that way, output nothing afterward
 
-DO NOT explain your reasoning for responding or not responding. DO NOT output meta-commentary about the conversation. Either respond naturally, react, or output nothing.
+DO NOT explain your reasoning for responding or not responding. DO NOT output meta-commentary about the conversation. Either respond naturally, react, or call `stay_silent`.
 """
 
         # Single cached block; volatile values (timestamp, momentum) ride the
