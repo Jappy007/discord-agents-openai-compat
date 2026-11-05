@@ -29,7 +29,9 @@ SEND_MESSAGE_TOOL = {
         "files actually attached - trust it over your own intentions. Plain "
         "text you output at the end of your turn still gets posted as "
         "ordinary messages too, so once you've said everything through this "
-        "tool, end your turn without restating it."
+        "tool, end your turn without restating it. If you decide to say "
+        "nothing at all, call stay_silent instead of writing your decision "
+        "as text."
     ),
     "input_schema": {
         "type": "object",
@@ -61,5 +63,38 @@ SEND_MESSAGE_TOOL = {
 }
 
 
+STAY_SILENT_TOOL = {
+    "name": "stay_silent",
+    "description": (
+        "Use this when you decide NOT to post a response. Calling it ends "
+        "your turn silently: nothing is posted to Discord, and any plain "
+        "text you output afterwards is discarded. Write your reason or "
+        "private thoughts in the reason field (it is recorded locally, "
+        "never posted) instead of putting them in your final text - final "
+        "text is published to the channel. If you already sent something "
+        "with send_message this turn, you are not silent anymore; only call "
+        "this when you truly want to say nothing."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": (
+                    "Private note on why you are staying silent (e.g. "
+                    "'conversation between others, nothing to add'). Never "
+                    "posted to Discord."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
+
 def get_send_message_tool() -> dict:
     return SEND_MESSAGE_TOOL
+
+
+def get_stay_silent_tool() -> dict:
+    return STAY_SILENT_TOOL

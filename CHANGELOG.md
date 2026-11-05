@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Status:** Pre-release (beta).
 
+### Added
+- **Clef decision gate before full model turns.** On Logfare, periodic channel
+  scans first ask `POST /v1/decisions` whether the bot should reply with text,
+  add an emoji reaction, or stay silent. Silent/reaction outcomes skip the full
+  model call entirely; a reaction is the complete response, so nothing else is
+  posted. When Clef chooses text, the full model generates the reply with the
+  old respond-vs-silence decision prompt and decision tools removed, so there is
+  only one decision-maker. If the gate call fails, the old decision path stays
+  disabled and the turn is treated as text.
+  Enabled automatically when `OPENAI_BASE_URL` contains `logfare.ai`, with
+  `CLEF_ENABLED`, `CLEF_MODEL`, `CLEF_DECISIONS_URL`, and
+  `CLEF_TIMEOUT_SECONDS` as overrides. DMs and @mentions keep the full path.
+- **`stay_silent` tool.** When the full model chooses not to respond, it calls
+  `stay_silent` instead of writing its reasoning as final text. The turn is
+  marked silent, final text is discarded, and nothing is posted to Discord.
+
 ### Changed
 - **OpenAI-compatible endpoints are now the only provider.** The native
   Anthropic client and every feature that only existed as an Anthropic
