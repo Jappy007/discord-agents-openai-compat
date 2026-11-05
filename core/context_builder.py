@@ -58,16 +58,6 @@ def describe_channel(channel) -> str:
     return f"#{name} (ID: {channel.id})"
 
 
-# Shared so callers that already made the response decision (Clef gate) can
-# strip this guidance from the assembled prompt.
-SILENCE_INSTRUCTION = (
-    "SILENCE: If you decide not to respond, call the stay_silent tool with a "
-    "short private reason and end your turn. Never write \"I won't respond\" "
-    "or your reasoning as text - any text you output is posted to Discord. "
-    "stay_silent is the only way to end a turn without posting."
-)
-
-
 class ContextBuilder:
     """
     Assembles rich context for model API calls.
@@ -298,8 +288,6 @@ The attachments_index section lists this channel's recent files with their IDs;
 retrieve anything marked 'not in context' with the discord get_attachment tool.
 
 CRITICAL: Do NOT narrate your thought process, explain your reasoning, or describe what you're about to do in your responses. Just respond naturally and directly. Your thinking is private - users only see your final response.
-
-{SILENCE_INSTRUCTION}
 </instructions>"""
 
         # Inline the channel state file (episodizer-maintained seed) - v0.6.0.

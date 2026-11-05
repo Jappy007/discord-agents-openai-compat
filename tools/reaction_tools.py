@@ -11,8 +11,6 @@ REACT_TOOL = {
         "React to a message with an emoji. Use for acknowledgments, "
         "agreement, or lightweight signals instead of a full reply - "
         "sometimes a reaction is more appropriate than a message. "
-        "A successful reaction is a complete response: your turn ends "
-        "silently, so do not also post text in the same turn. "
         "Each call adds one reaction to one message. You can add "
         "multiple reactions to the same message with separate calls. "
         "Use standard Unicode emoji (e.g. 👍 👎 😂 ❤️ 🎉 👀 ✅ ❌) or "

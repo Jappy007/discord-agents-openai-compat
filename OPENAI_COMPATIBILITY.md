@@ -26,27 +26,6 @@ OPENAI_UTILITY_MODEL=gpt-4o-mini
 `OPENAI_API_KEY` and `OPENAI_BASE_URL` are required. A model must be configured
 either through `OPENAI_MODEL` or `api.model` in the bot YAML.
 
-## Clef decision gate (Logfare)
-
-On Logfare, periodic channel scans are triaged by Clef before a full model call:
-it chooses text, an emoji reaction, or silence. When Clef chooses text, the
-full model writes the reply without the old response-decision prompt or the
-`stay_silent`/reaction tools, so Clef is the only decision-maker. It is enabled
-automatically when `OPENAI_BASE_URL` contains `logfare.ai`. If the decision
-call itself fails, the old decision path stays disabled and the turn is
-treated as text.
-
-```bash
-# Optional overrides
-CLEF_ENABLED=true
-CLEF_MODEL=clef            # clef | clef-flash
-CLEF_DECISIONS_URL=https://logfare.ai/v1/decisions
-CLEF_TIMEOUT_SECONDS=3
-```
-
-When the full model chooses silence, it calls the `stay_silent` tool so its
-private reasoning is never posted as a chat message.
-
 ## How it works
 
 `OpenAICompatibleClient` exposes the client shape the shared code expects

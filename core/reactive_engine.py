@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from .user_cache import UserCache
 
 from .memory_tool_executor import MemoryToolExecutor
-from .context_builder import ContextBuilder, SILENCE_INSTRUCTION
+from .context_builder import ContextBuilder
 from .mcp_manager import MCPManager
 from .unified_attachment_manager import UnifiedAttachmentManager
 from .vaults import VaultEnforcer
@@ -120,12 +120,6 @@ class ToolLoopResult:
     sent_message_ids: List[str] = field(default_factory=list)
     last_sent_message: Any = None  # discord.Message, for engagement tracking
     consumed_local_files: set = field(default_factory=set)  # local attachments, don't re-send
-    # Explicit silence (v0.13): the model called stay_silent. Any final text
-    # is private reasoning and must never be posted.
-    stayed_silent: bool = False
-    # Reaction-only decision (v0.13): add_reaction is the whole response.
-    # The turn ends silently - no text is posted after it.
-    reaction_used: bool = False
 
     @property
     def did_send(self) -> bool:
@@ -782,18 +776,13 @@ class ReactiveEngine:
         )
 
     def _build_api_params(self, system_blocks: list, conversation_state, context,
-                          is_dm: bool = False, decision_tools: bool = True) -> dict:
+                          is_dm: bool = False) -> dict:
         """
         Assemble the chat request shared by both response paths: tool
         registry and message history.
 
         is_dm (v0.9): DM requests don't get ask_prime - a DM already IS the
         Prime. Tool sets stay stable per channel.
-
-        decision_tools=False removes stay_silent and the reaction tools. The
-        Clef gate uses this after it has already chosen "text": the full model
-        generates the reply instead of re-running the old respond-vs-silence
-        decision.
         """
         from .memory_tool_executor import MEMORY_TOOL_SCHEMA
         tools = [MEMORY_TOOL_SCHEMA]
@@ -813,18 +802,12 @@ class ReactiveEngine:
             tools.append(ASK_PRIME_TOOL)
 
         # Native messaging (v0.12.0): deliberate mid-turn sends
-        from tools.send_message import SEND_MESSAGE_TOOL, STAY_SILENT_TOOL
+        from tools.send_message import SEND_MESSAGE_TOOL
         tools.append(SEND_MESSAGE_TOOL)
-        if decision_tools:
-            # Explicit silence (v0.13): the counterpart to send_message - when
-            # the model has nothing to say, it calls this instead of emitting
-            # text that would otherwise be posted as a reply. Omitted when
-            # Clef already decided this turn needs text.
-            tools.append(STAY_SILENT_TOOL)
 
-            # Reaction tools
-            from tools.reaction_tools import get_reaction_tools
-            tools.extend(get_reaction_tools())
+        # Reaction tools
+        from tools.reaction_tools import get_reaction_tools
+        tools.extend(get_reaction_tools())
 
         # YouTube watching tool (if available)
         try:
@@ -834,10 +817,9 @@ class ReactiveEngine:
             pass  # youtube-transcript-api not installed
 
         # Reactions: lightweight acknowledgments without full replies
-        if decision_tools:
-            from tools.reaction_tools import get_add_reaction_tool, get_remove_reaction_tool
-            tools.append(get_add_reaction_tool())
-            tools.append(get_remove_reaction_tool())
+        from tools.reaction_tools import get_add_reaction_tool, get_remove_reaction_tool
+        tools.append(get_add_reaction_tool())
+        tools.append(get_remove_reaction_tool())
 
         if self.web_search_enabled:
             # Client-side web tools - see tools/client_web_tools.py and the
@@ -1084,24 +1066,6 @@ class ReactiveEngine:
                     "content": result
                 })
 
-            # Explicit silence (v0.13): the model is choosing not to speak.
-            # Mark the turn so the loop discards final text (private
-            # reasoning) instead of posting it to the channel.
-            elif block.name == "stay_silent":
-                reason = (block.input.get("reason") or "").strip()
-                note("stay_silent", "silence", reason[:120])
-                if loop_result is not None:
-                    loop_result.stayed_silent = True
-                result = (
-                    "Acknowledged - nothing will be posted this turn. End your "
-                    "turn now and do not write any text."
-                )
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result
-                })
-
             elif block.name == "web_search":
                 from tools.client_web_tools import execute_web_search
                 query = block.input.get("query", "")
@@ -1128,11 +1092,6 @@ class ReactiveEngine:
                 from tools.reaction_tools import execute_reaction_tool
                 note("reaction", block.name, kv(block.input))
                 result = await execute_reaction_tool(block.name, block.input, message)
-                # A successful reaction is a complete response: the model
-                # chose to acknowledge without words. End the turn silently.
-                if (block.name == "add_reaction" and loop_result is not None
-                        and result.startswith("Reacted")):
-                    loop_result.reaction_used = True
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -1238,8 +1197,7 @@ class ReactiveEngine:
                 # Safety cap: a model that keeps requesting tools must not loop unbounded
                 if loop_iteration >= MAX_TOOL_LOOP_ITERATIONS:
                     logger.warning(f"Tool use loop exceeded {MAX_TOOL_LOOP_ITERATIONS} iterations{log_suffix}")
-                    if (fallback_text and not result.did_send
-                            and not result.stayed_silent and not result.reaction_used):
+                    if fallback_text and not result.did_send:
                         result.response_text = result.response_text or "I got stuck in a tool loop - try asking again."
                     break
                 result.tools_were_used = True
@@ -1305,14 +1263,6 @@ class ReactiveEngine:
                     except Exception as e:
                         logger.error(f"Failed to persist tool results to conversation state{log_suffix}: {e}", exc_info=True)
 
-                # Explicit silence ends the turn immediately. Anything the
-                # model would have written after stay_silent is private
-                # reasoning, not a message. A reaction is also the whole
-                # response - the turn ends silently after it.
-                if result.stayed_silent or result.reaction_used:
-                    result.response_text = ""
-                    break
-
                 continue
 
             elif response.stop_reason == "end_turn":
@@ -1329,12 +1279,6 @@ class ReactiveEngine:
 
                 if citations_list:
                     result.response_text += "\n\n**Sources:**\n" + "\n".join(f"- {cite}" for cite in citations_list)
-
-                # stay_silent / reaction are the decision. Final text after
-                # either is private reasoning and must never reach the channel.
-                if result.stayed_silent or result.reaction_used:
-                    result.response_text = ""
-                    break
 
                 # Tools ran but the model went quiet: reprompt once for a
                 # brief confirmation (unless it already sent via send_message
@@ -1407,18 +1351,14 @@ class ReactiveEngine:
                         f"bounces on the must-reply path{log_suffix} - shipping anyway"
                     )
 
-                # Must-reply is satisfied by tool sends too (v0.12.0), and an
-                # explicit stay_silent overrides it.
-                if (not result.response_text and fallback_text
-                        and not result.did_send and not result.stayed_silent
-                        and not result.reaction_used):
+                # Must-reply is satisfied by tool sends too (v0.12.0)
+                if not result.response_text and fallback_text and not result.did_send:
                     result.response_text = fallback_text
                 break
 
             else:
                 logger.warning(f"Unexpected stop_reason{log_suffix}: {response.stop_reason}")
-                if (fallback_text and not result.did_send
-                        and not result.stayed_silent and not result.reaction_used):
+                if fallback_text and not result.did_send:
                     result.response_text = fallback_text
                 break
 
@@ -1691,45 +1631,6 @@ class ReactiveEngine:
                             fallback_text="I'm not sure how to respond to that.",
                             volatile_tail=volatile_tail,
                         )
-
-            # Reaction-only turn: the model acknowledged with an emoji and
-            # the loop discarded any text it wrote afterwards.
-            if result.reaction_used and not result.did_send:
-                self.conversation_logger.log_bot_response(
-                    "[Reacted - staying silent]", 0)
-                self.conversation_logger.log_separator()
-                await self._persist_assistant_response(
-                    conversation_state, channel_id, result, seed_epoch)
-                await self._emit_turn_event(
-                    "reaction",
-                    message, result,
-                    [self._trigger_from(message, addressed=True)],
-                    decision="reaction",
-                )
-                logger.info(
-                    f"Model reacted instead of replying to {message.author.name}"
-                )
-                return
-
-            # Explicit stay_silent: the model chose not to post here. Final
-            # text (if any) was private reasoning and the loop already
-            # cleared it - never send it.
-            if result.stayed_silent and not result.did_send:
-                self.conversation_logger.log_bot_response(
-                    "[No response - stayed silent on request]", 0)
-                self.conversation_logger.log_separator()
-                await self._persist_assistant_response(
-                    conversation_state, channel_id, result, seed_epoch)
-                await self._emit_turn_event(
-                    "silent",
-                    message, result,
-                    [self._trigger_from(message, addressed=True)],
-                    decision="stay_silent",
-                )
-                logger.info(
-                    f"Model stayed silent on @mention from {message.author.name}"
-                )
-                return
 
             # Send response (outside semaphore to allow concurrent API calls
             # while sending). Final text may be empty when the model already
@@ -2284,96 +2185,6 @@ class ReactiveEngine:
             logger.error(f"Error calculating momentum for {channel_id}: {e}", exc_info=True)
             return "cold"
 
-    @staticmethod
-    def _content_to_plain_text(content) -> str:
-        """Flatten one state message's content blocks into text for Clef."""
-        if isinstance(content, str):
-            return content
-        parts = []
-        for block in content or []:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    parts.append(block.get("text") or "")
-            elif getattr(block, "type", None) == "text":
-                parts.append(getattr(block, "text", "") or "")
-        return "\n".join(p for p in parts if p)
-
-    def _build_clef_state(self, message: discord.Message, conversation_state,
-                          context) -> str:
-        """A compact transcript for the decision model - text only, newest last."""
-        header = "\n".join([
-            f"Bot: {self.config.name}"
-            + (f" - {self.config.description}" if self.config.description else ""),
-            f"Channel: {getattr(message.channel, 'name', 'DM')}",
-            f"Conversation momentum: {context.get('conversation_momentum', 'cold').upper()}",
-            "",
-            "Recent conversation (oldest to newest, with authors):",
-        ])
-
-        # The context builder's history already carries author names and the
-        # current message - better triage input than the raw state turns.
-        transcript = "\n".join(
-            self._content_to_plain_text(entry.get("content"))
-            for entry in context.get("messages", [])
-        ).strip()
-        # Drop the memory-path scaffolding appended after the conversation.
-        transcript = transcript.split("\nMEMORY (", 1)[0].strip()
-
-        if not transcript and conversation_state:
-            rendered = []
-            for entry in conversation_state.messages[-24:]:
-                text = self._content_to_plain_text(entry.get("content")).strip()
-                if not text:
-                    continue
-                role = "Bot (you)" if entry.get("role") == "assistant" else "User"
-                rendered.append(f"[{role}] {text[:800]}")
-            transcript = "\n".join(rendered)
-
-        if not transcript:
-            transcript = f"[User] {(message.content or '')[:800]}"
-
-        # Keep the request small and the decision cheap, but always keep the
-        # header (bot identity + momentum) above the truncated transcript.
-        budget = max(1000, 8000 - len(header))
-        return header + "\n" + transcript[-budget:]
-
-    async def _clef_gate(self, message: discord.Message, conversation_state,
-                         context):
-        """Ask Clef whether this scan needs text, a reaction, or nothing.
-
-        Returns a ResponseDecision, or None when the gate is disabled/unavailable
-        (callers then run the normal full-model path).
-        """
-        from .llm_providers.decisions import clef_enabled, decide_response
-
-        if not clef_enabled() or message.guild is None:
-            # DMs stay on the full path - a private 1:1 conversation is
-            # already addressed, and silent triage there feels like being
-            # ignored.
-            return None
-
-        state = self._build_clef_state(message, conversation_state, context)
-        return await decide_response(state)
-
-    def _record_clef_outcome(self, message: discord.Message, triggers: list,
-                             decision, *, emoji: Optional[str] = None,
-                             kind: str = "silent") -> None:
-        """Log and emit a turn event for a Clef short-circuit."""
-        result = ToolLoopResult(stayed_silent=True)
-        label = f"reaction {emoji}" if emoji else "silence"
-        self.conversation_logger.log_bot_response(
-            f"[No full reply - Clef chose {label}]", 0)
-        self.conversation_logger.log_separator()
-        self._responded_messages.append(message.id)
-        self._track_task(asyncio.create_task(
-            self._emit_turn_event(
-                kind, message, result, triggers,
-                decision=decision.action,
-                emoji=emoji,
-                clef_confidence=decision.confidence,
-            )
-        ))
-
     async def _call_model_for_response_decision(self, message: discord.Message, context,
                                                  triggers: list = None):
         """
@@ -2410,67 +2221,9 @@ class ReactiveEngine:
         if context.get("stats"):
             self.conversation_logger.log_context_building(**context["stats"])
 
-        # Cheap triage first (v0.13): Clef is the sole response decision-maker
-        # whenever it is enabled. The old full-model decision prompt is never
-        # used in that mode - even if the gate call fails, the fallback is a
-        # text-generation turn, not a second decision path.
-        from .llm_providers.decisions import clef_enabled
-        clef_active = clef_enabled()
-        decision = await self._clef_gate(
-            message, conversation_state, context)
-        clef_decided = clef_active
-        if clef_active and decision is None and message.guild is not None:
-            logger.warning(
-                "Clef is enabled but returned no decision - old decision path "
-                "is disabled; treating this turn as text"
-            )
-        if decision is not None:
-            self.conversation_logger.log_decision(
-                should_respond=decision.should_respond,
-                reason=(
-                    f"clef: {decision.action} "
-                    f"(confidence {decision.confidence:.2f})"
-                ),
-                rate_limit_stats=self.rate_limiter.get_stats(channel_id),
-            )
-
-            if decision.action == "none":
-                logger.info(
-                    f"Clef chose silence in channel {channel_id} "
-                    f"(confidence {decision.confidence:.2f})"
-                )
-                self._record_clef_outcome(message, triggers, decision)
-                return
-
-            if decision.action == "reaction":
-                emoji = decision.emoji or "👍"
-                try:
-                    await message.add_reaction(emoji)
-                except discord.HTTPException as e:
-                    # A failed reaction is not worth losing the turn over -
-                    # fall through and let the full model answer instead.
-                    logger.warning(
-                        f"Clef reaction {emoji} failed in channel {channel_id}: {e} "
-                        "- falling back to full model"
-                    )
-                else:
-                    logger.info(
-                        f"Clef chose reaction {emoji} in channel {channel_id} "
-                        f"(confidence {decision.confidence:.2f})"
-                    )
-                    self._record_clef_outcome(
-                        message, triggers, decision, emoji=emoji, kind="reaction")
-                    return
-
-            logger.info(
-                f"Clef gate chose text in channel {channel_id} "
-                f"(confidence {decision.confidence:.2f}) - calling full model"
-            )
-
         # Prevent concurrent responses
         async with self._response_semaphore:
-            system_blocks = self._build_response_decision_prompt(
-                context, clef_decided=clef_decided)
+            system_blocks = self._build_response_decision_prompt(context)
             # Momentum is recomputed every check - volatile tail, not system
             volatile_tail = await self._build_volatile_tail(
                 (context.get("time_context", "")
@@ -2481,8 +2234,7 @@ class ReactiveEngine:
 
             api_params = self._build_api_params(
                 system_blocks, conversation_state, context,
-                is_dm=message.guild is None,
-                decision_tools=not clef_decided)
+                is_dm=message.guild is None)
             # Usage recorded later must match the session we measured
             seed_epoch = conversation_state.seed_epoch if conversation_state else 0
 
@@ -2495,33 +2247,16 @@ class ReactiveEngine:
                     volatile_tail=volatile_tail, log_suffix=" (periodic)",
                 )
 
-                # Reaction-only decision: it acknowledged with an emoji, and
-                # any text it wrote afterwards was discarded by the loop.
-                if result.reaction_used and not result.did_send:
-                    logger.info(f"model reacted instead of replying in channel {channel_id}")
-                    self.conversation_logger.log_bot_response("[Reacted - staying silent]", 0)
-                    self.conversation_logger.log_separator()
-                    await self._persist_assistant_response(
-                        conversation_state, channel_id, result, seed_epoch)
-                    await self._emit_turn_event(
-                        "reaction", message, result, triggers,
-                        scan_count=len(triggers), decision="reaction")
-                    self._responded_messages.append(message.id)
-                    return
-
                 # Empty text and no tool sends = model decided to stay silent
                 if not result.response_text.strip() and not result.did_send:
-                    if result.stayed_silent:
-                        logger.info(f"model explicitly stayed silent in channel {channel_id}")
-                    elif result.tools_were_used:
+                    if result.tools_were_used:
                         logger.warning(f"model used tools but returned no text response in channel {channel_id}")
                     else:
                         logger.info(f"model decided not to respond in channel {channel_id}")
                     self.conversation_logger.log_bot_response("[No response - staying silent]", 0)
                     self.conversation_logger.log_separator()
                     await self._emit_turn_event(
-                        "silent", message, result, triggers, scan_count=len(triggers),
-                        decision="stay_silent" if result.stayed_silent else "none")
+                        "silent", message, result, triggers, scan_count=len(triggers))
                     self._responded_messages.append(message.id)
                     return
 
@@ -2592,36 +2327,18 @@ class ReactiveEngine:
         except (asyncio.CancelledError, discord.HTTPException):
             pass
 
-    def _build_response_decision_prompt(self, context, clef_decided: bool = False) -> list:
+    def _build_response_decision_prompt(self, context) -> list:
         """
-        Build system prompt for periodic checks.
+        Build system prompt for response decision in periodic checks.
 
-        Normally this includes the old response-decision criteria. When
-        clef_decided is True, Clef has already chosen "text", so the full
-        model is told to write the reply and must not re-decide whether to
-        respond - the old decision path is disabled.
+        Includes criteria for when to respond based on conversation momentum.
 
         Args:
             context: Context package from ContextBuilder
-            clef_decided: Clef already chose a text response
 
         Returns:
             System prompt list for model API
         """
-        if clef_decided:
-            base_prompt = context["system_prompt"].replace(
-                SILENCE_INSTRUCTION, "").rstrip()
-            clef_directive = """
-
-# Response Decision (Already Made)
-
-The respond-vs-silence decision has already been made: this turn needs a text reply from you. Do not re-evaluate whether to respond, and do not stay silent. Write only your actual reply in your own voice - no meta-commentary, no explanation of the decision, and no text describing what you are doing.
-"""
-            return [{
-                "type": "text",
-                "text": base_prompt + clef_directive,
-            }]
-
         bot_name = self.discord_client.user.display_name if self.discord_client else "Assistant"
 
         # Qualitative momentum descriptions (generic for all bots - v0.5.0 Phase 9)
@@ -2664,12 +2381,12 @@ Your personality and base prompt guide whether to participate. Consider relevanc
 
 **RESPONSE FORMAT:**
 - If you decide to respond with text: Output ONLY your message to the channel (no meta-commentary, no explanation of your decision)
-- If you decide NOT to respond with text but still want to acknowledge: call `add_reaction` with an appropriate emoji. A reaction is the whole response - the turn ends silently, so do not also write text
-- If you decide NOT to respond at all: call `stay_silent` with a short private reason, then end your turn. Do NOT output any text - plain text at the end of your turn is posted to the channel, so any reasoning or explanation you write there becomes a visible message.
+- If you decide NOT to respond with text but still want to acknowledge: call `add_reaction` with an appropriate emoji, then output nothing
+- If you decide NOT to respond at all: Output ABSOLUTELY NOTHING (not even an explanation - complete silence)
 - When your response answers ONE specific message in a batch of several, prefer the send_message tool with reply_to_message_id so it lands anchored to that message
 - send_message can be called more than once in a turn (messages arrive in order) - e.g. an anchored reply to one person, then a separate message for the others. If you've sent everything that way, output nothing afterward
 
-DO NOT explain your reasoning for responding or not responding. DO NOT output meta-commentary about the conversation. Either respond naturally, react, or call `stay_silent`.
+DO NOT explain your reasoning for responding or not responding. DO NOT output meta-commentary about the conversation. Either respond naturally, react, or output nothing.
 """
 
         # Single cached block; volatile values (timestamp, momentum) ride the
