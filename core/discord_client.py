@@ -825,7 +825,9 @@ class DiscordClient(discord.Client):
         Each channel's first successful pass is a full backfill of the
         configured window; the completion is persisted so later boots only
         fetch the gap since the last backfill (i.e. messages missed while the
-        bot was offline). Set `force_full` to ignore the marker (manual
+        bot was offline). Widening the configured window later (for example
+        30 days -> unlimited) re-sweeps that channel's full window so older
+        history is picked up. Set `force_full` to ignore the marker (manual
         reindex / edit sweep).
 
         Args:
@@ -840,6 +842,20 @@ class DiscordClient(discord.Client):
             if dt is not None and dt.tzinfo is None:
                 return dt.replace(tzinfo=timezone.utc)
             return dt
+
+        def _widened(stored_days, configured_days):
+            """True when the configured window reaches further back than the
+            initial backfill already did.
+
+            0 means unlimited (the widest). Legacy rows have no recorded
+            depth (None): only a move to unlimited is a guaranteed widening,
+            so we don't force a surprise full sweep for every existing install.
+            """
+            if stored_days is None:
+                return configured_days <= 0
+            if stored_days == 0:
+                return False
+            return configured_days <= 0 or configured_days > stored_days
 
         if days_back <= 0:
             logger.info("Starting UNLIMITED message history backfill (all accessible history)...")
@@ -856,6 +872,7 @@ class DiscordClient(discord.Client):
         failed_channels = 0
         initial_channels = 0
         gap_channels = 0
+        widened_channels = 0
 
         for guild in self.guilds:
             # Only backfill configured servers
@@ -870,16 +887,33 @@ class DiscordClient(discord.Client):
                     channel_id = str(channel.id)
                     channel_messages = 0
                     state = backfill_state.get(channel_id)
+                    widened = bool(
+                        state
+                        and state.get("initial_backfill_completed_at")
+                        and _widened(state.get("backfill_window_days"),
+                                     days_back)
+                    )
                     is_initial = (
                         force_full
                         or not state
                         or not state.get("initial_backfill_completed_at")
+                        or widened
                     )
 
                     if is_initial:
-                        # First pass for this channel: full configured window.
+                        # First pass for this channel, or the configured
+                        # window now reaches further back than before: sweep
+                        # the full configured window. Stored messages dedupe
+                        # by ID, so re-seeing known history is harmless.
                         after = cutoff
-                        logger.debug(f"  Backfilling #{channel.name} (initial)...")
+                        if widened:
+                            widened_channels += 1
+                            logger.debug(
+                                f"  Backfilling #{channel.name} "
+                                f"(widened window)...")
+                        else:
+                            logger.debug(
+                                f"  Backfilling #{channel.name} (initial)...")
                     else:
                         # Later pass: only the gap since the last backfill.
                         # `resume` (newest stored message) wins when newer;
@@ -915,7 +949,8 @@ class DiscordClient(discord.Client):
                     # Only mark complete after the pass succeeds, so a
                     # permission/network failure is retried next boot.
                     await self.message_memory.mark_backfill_complete(
-                        channel_id, str(guild.id), initial=is_initial)
+                        channel_id, str(guild.id), initial=is_initial,
+                        window_days=days_back)
 
                     if is_initial:
                         initial_channels += 1
@@ -936,6 +971,9 @@ class DiscordClient(discord.Client):
         logger.info(f"Backfill complete: {total_messages} messages from {total_channels} channels")
         logger.info(f"  {initial_channels} initial backfill(s), "
                     f"{gap_channels} gap backfill(s)")
+        if widened_channels:
+            logger.info(f"  ({widened_channels} re-swept because the "
+                        f"configured window was widened)")
         if failed_channels > 0:
             logger.info(f"  ({failed_channels} channels skipped due to permissions/errors)")
 

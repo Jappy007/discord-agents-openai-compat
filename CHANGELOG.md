@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored message / last backfill, instead of sweeping the configured window
   again. The daily 3 AM full re-backfill was removed; the manual `@bot reindex`
   command still performs a full window sweep on demand.
+- **Widening the backfill window now deepens history automatically.** Each
+  channel's recorded backfill state now includes how far back the initial sweep
+  reached (`backfill_window_days`, 0 = unlimited). When the configured window
+  is widened - notably switching from 30 days to Unlimited - the next boot
+  re-sweeps that channel so older messages are indexed, instead of assuming
+  the channel was already fully backfilled. Existing databases are migrated and
+  a move to Unlimited triggers the deeper sweep once.
 
 ---
 

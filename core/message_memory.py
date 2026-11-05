@@ -100,7 +100,10 @@ class MessageMemory:
         channel_id TEXT PRIMARY KEY,
         guild_id TEXT,
         initial_backfill_completed_at DATETIME,
-        last_backfilled_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        last_backfilled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        -- Days covered by the initial backfill. 0 = unlimited.
+        -- NULL = unknown (legacy rows created before this column existed).
+        backfill_window_days INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS threads (
@@ -193,6 +196,32 @@ class MessageMemory:
                 logger.info("Migration complete: is_system column added")
             else:
                 logger.debug("is_system column already exists, skipping migration")
+
+        except Exception as e:
+            logger.error(f"Error running migrations: {e}", exc_info=True)
+
+        # Migration: remember how far back the initial backfill went, so
+        # widening the configured window (e.g. 30 days -> unlimited) triggers
+        # a deeper sweep instead of being mistaken for "already done".
+        try:
+            cursor = await self._db.execute("PRAGMA table_info(backfill_state)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+
+            if "backfill_window_days" not in column_names:
+                logger.info(
+                    "Running migration: Adding backfill_window_days column to "
+                    "backfill_state table")
+                await self._db.execute(
+                    "ALTER TABLE backfill_state ADD COLUMN "
+                    "backfill_window_days INTEGER")
+                await self._db.commit()
+                logger.info(
+                    "Migration complete: backfill_window_days column added")
+            else:
+                logger.debug(
+                    "backfill_window_days column already exists, "
+                    "skipping migration")
 
         except Exception as e:
             logger.error(f"Error running migrations: {e}", exc_info=True)
@@ -809,7 +838,7 @@ class MessageMemory:
         (or with it unset) still need their first, full backfill."""
         cursor = await self._db.execute(
             "SELECT channel_id, guild_id, initial_backfill_completed_at,"
-            " last_backfilled_at FROM backfill_state")
+            " last_backfilled_at, backfill_window_days FROM backfill_state")
         out = {}
         for row in await cursor.fetchall():
             state = dict(row)
@@ -824,24 +853,44 @@ class MessageMemory:
         return out
 
     async def mark_backfill_complete(self, channel_id: str, guild_id: str,
-                                     initial: bool = False) -> None:
+                                     initial: bool = False,
+                                     window_days: Optional[int] = None) -> None:
         """Record that a channel's backfill pass succeeded.
 
         Sets the one-time initial marker on the first successful pass and
         refreshes `last_backfilled_at` every time, which is the resume point
-        for gap-only backfills after downtime."""
+        for gap-only backfills after downtime.
+
+        `window_days` records how far back that initial pass reached
+        (0 = unlimited). It never shrinks: widening the window later keeps the
+        widest previously-covered depth; passing None leaves it unchanged
+        (used by gap-only passes).
+        """
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """INSERT INTO backfill_state
-                 (channel_id, guild_id, initial_backfill_completed_at, last_backfilled_at)
-               VALUES (?, ?, ?, ?)
+                 (channel_id, guild_id, initial_backfill_completed_at,
+                  last_backfilled_at, backfill_window_days)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(channel_id) DO UPDATE SET
                  guild_id = excluded.guild_id,
                  initial_backfill_completed_at = COALESCE(
                    backfill_state.initial_backfill_completed_at,
                    excluded.initial_backfill_completed_at),
-                 last_backfilled_at = excluded.last_backfilled_at""",
-            (str(channel_id), str(guild_id), now if initial else None, now),
+                 last_backfilled_at = excluded.last_backfilled_at,
+                 backfill_window_days = CASE
+                   WHEN excluded.backfill_window_days IS NULL
+                     THEN backfill_state.backfill_window_days
+                   WHEN backfill_state.backfill_window_days IS NULL
+                     THEN excluded.backfill_window_days
+                   WHEN backfill_state.backfill_window_days = 0
+                     OR excluded.backfill_window_days = 0
+                     THEN 0
+                   ELSE MAX(backfill_state.backfill_window_days,
+                            excluded.backfill_window_days)
+                 END""",
+            (str(channel_id), str(guild_id), now if initial else None, now,
+             window_days if initial else None),
         )
         await self._db.commit()
 
