@@ -140,6 +140,7 @@ class AgenticEngine:
         # attached by discord_client.on_ready (it lives on ReactiveEngine).
         self._coordination_queue = []
         self._coordination_tasks = set()
+        self._drain_lock = asyncio.Lock()
         self.watch_manager = None
         self.conversation_state_manager = None
 
@@ -575,6 +576,14 @@ class AgenticEngine:
         Args:
             action: Action to execute
         """
+        locks = getattr(getattr(self.discord_client, "reactive_engine", None),
+                        "channel_locks", None)
+        if locks is not None:
+            async with locks.lock(action.channel_id):
+                return await self._execute_action_locked(action)
+        return await self._execute_action_locked(action)
+
+    async def _execute_action_locked(self, action: ProactiveAction):
         logger.info(f"Executing {action.type} action in channel {action.channel_id}")
 
         if action.type == "followup":
@@ -1082,6 +1091,15 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
         if not self.conversation_state_manager:
             logger.warning("No conversation state manager - context note dropped")
             return
+        locks = getattr(getattr(self.discord_client, "reactive_engine", None),
+                        "channel_locks", None)
+        if locks is not None:
+            async with locks.lock(channel_id):
+                await self._inject_context_note_locked(channel_id, note)
+        else:
+            await self._inject_context_note_locked(channel_id, note)
+
+    async def _inject_context_note_locked(self, channel_id: str, note: str) -> None:
         state = await self.conversation_state_manager.get_or_create(str(channel_id))
         state.add_message("user", note)
         state.enforce_message_cap()
@@ -1099,6 +1117,12 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
             pass  # no running loop (tests) - the hourly backstop drains it
 
     async def _drain_coordination_queue(self) -> None:
+        """One drainer at a time (0.13.1): a per-tick backstop and an
+        enqueue-triggered drain must not both pop the head."""
+        async with self._drain_lock:
+            await self._drain_coordination_queue_locked()
+
+    async def _drain_coordination_queue_locked(self) -> None:
         """Send queued coordination messages; stop at the first gate so
         deferred sends retry next tick instead of being dropped."""
         while self._coordination_queue:
@@ -1112,7 +1136,7 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
                 return
             self._coordination_queue.pop(0)
             try:
-                await self._execute_coordination_message(action)
+                await self._execute_action(action)
             except Exception as e:
                 logger.error(f"Coordination send failed: {e}", exc_info=True)
 

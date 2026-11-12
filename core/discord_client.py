@@ -464,6 +464,52 @@ class DiscordClient(discord.Client):
 
         logger.info("Bot is ready!")
 
+    async def _track_own_attachments(self, message: discord.Message,
+                                     processed_attachments: list) -> None:
+        """Echo this bot's own attachments into conversation state, under the
+        channel's turn lock so it can't land mid-turn between tool results
+        and a reply (0.13.1)."""
+        try:
+            channel_id = str(message.channel.id)
+            async with self.reactive_engine.channel_locks.lock(channel_id):
+                conversation_state = await self.reactive_engine.conversation_state_manager.get_or_create(channel_id)
+
+                # Extract attachment IDs
+                attachment_ids = [att["attachment_id"] for att in processed_attachments]
+
+                # Build content blocks; role='assistant' yields text
+                # placeholders only - image blocks in assistant turns are
+                # rejected by the API
+                content_blocks = []
+
+                # Add text content first if exists
+                if message.content:
+                    content_blocks.append({"type": "text", "text": message.content})
+
+                for att in processed_attachments:
+                    block = self.reactive_engine.attachment_manager.build_content_block(
+                        att.get("for_api"), att["filename"], role="assistant"
+                    )
+                    if block:
+                        content_blocks.append(block)
+
+                # Use content blocks if we have attachments, otherwise just text
+                content = content_blocks if content_blocks else (message.content or "[File uploaded]")
+
+                # Add bot message with attachments to conversation state
+                conversation_state.add_message(
+                    role="assistant",  # Bot messages are assistant role
+                    content=content,
+                    attachment_ids=attachment_ids
+                )
+
+                # Save updated state
+                await self.reactive_engine.conversation_state_manager.save(conversation_state)
+                logger.info(f"Tracked {len(attachment_ids)} bot attachments in conversation state for testing")
+
+        except Exception as e:
+            logger.error(f"Failed to track bot attachments in conversation state: {e}", exc_info=True)
+
     async def on_message(self, message: discord.Message):
         """
         New message received.
@@ -543,45 +589,7 @@ class DiscordClient(discord.Client):
         # Track THIS bot's attachments in conversation state (v0.5.0)
         # Bug #4 fix: Only track THIS bot's attachments, not other bots (treat them as users)
         if message.author.id == self.user.id and processed_attachments and self.reactive_engine.conversation_state_manager:
-            try:
-                channel_id = str(message.channel.id)
-                conversation_state = await self.reactive_engine.conversation_state_manager.get_or_create(channel_id)
-
-                # Extract attachment IDs
-                attachment_ids = [att["attachment_id"] for att in processed_attachments]
-
-                # Build content blocks; role='assistant' yields text
-                # placeholders only - image blocks in assistant turns are
-                # rejected by the API
-                content_blocks = []
-
-                # Add text content first if exists
-                if message.content:
-                    content_blocks.append({"type": "text", "text": message.content})
-
-                for att in processed_attachments:
-                    block = self.reactive_engine.attachment_manager.build_content_block(
-                        att.get("for_api"), att["filename"], role="assistant"
-                    )
-                    if block:
-                        content_blocks.append(block)
-
-                # Use content blocks if we have attachments, otherwise just text
-                content = content_blocks if content_blocks else (message.content or "[File uploaded]")
-
-                # Add bot message with attachments to conversation state
-                conversation_state.add_message(
-                    role="assistant",  # Bot messages are assistant role
-                    content=content,
-                    attachment_ids=attachment_ids
-                )
-
-                # Save updated state
-                await self.reactive_engine.conversation_state_manager.save(conversation_state)
-                logger.info(f"Tracked {len(attachment_ids)} bot attachments in conversation state for testing")
-
-            except Exception as e:
-                logger.error(f"Failed to track bot attachments in conversation state: {e}", exc_info=True)
+            await self._track_own_attachments(message, processed_attachments)
 
         # Update user cache
         try:

@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import shutil
 
-from .vaults import VaultEnforcer
+from .vaults import (
+    _WRITE_COMMANDS, VaultEnforcer, memory_path_problem, normalize_memory_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ MEMORY_TOOL_SCHEMA = {
             "new_str": {"type": "string", "description": "Replacement text, for 'str_replace' or text to insert for 'insert'"},
             "insert_line": {"type": "integer", "description": "Line number to insert after (0 = top of file), for 'insert'"},
             "new_path": {"type": "string", "description": "Destination path, for 'rename'"},
+            "old_path": {"type": "string", "description": "Alias for path, for 'rename'"},
+            "insert_text": {"type": "string", "description": "Alias for new_str, for 'insert'"},
         },
         "required": ["command", "path"],
     },
@@ -92,8 +96,27 @@ class MemoryToolExecutor:
             write_grant: one-shot /memory consent (v0.9) - that user's own
                 global profile is writable from their DM for this turn
         """
+        # The trained memory tool names rename's source old_path and insert's
+        # text insert_text; map those aliases first, so every check below
+        # judges the path rename actually moves.
+        tool_input = dict(tool_input)
+        if tool_input.get("command") == "rename" and tool_input.get("old_path"):
+            tool_input["path"] = tool_input["old_path"]
+        if tool_input.get("command") == "insert" and "insert_text" in tool_input:
+            tool_input["new_str"] = tool_input["insert_text"]
+
+        # Every check below reads the path as written, so it must be the path
+        # that gets touched: "a/b/../../c" and Windows backslashes would
+        # otherwise pass a vault or DM rule and land somewhere else.
+        tool_input = {**tool_input, **{
+            key: normalize_memory_path(tool_input[key])
+            for key in ("path", "new_path") if tool_input.get(key)}}
         command = tool_input.get("command")
         path = tool_input.get("path", "")
+        for key in ("path", "new_path"):
+            problem = memory_path_problem(tool_input.get(key) or "")
+            if problem:
+                return f"Error: Invalid path '{tool_input[key]}' ({problem})"
 
         if command != "rename":
             if not self._validate_path(path):

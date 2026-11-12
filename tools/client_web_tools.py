@@ -58,6 +58,34 @@ WEB_FETCH_TOOL = {
 _MAX_RESULTS = 8
 _MAX_FETCH_CHARS = 8000
 _USER_AGENT = "Mozilla/5.0 (compatible; DiscordAgentBot/1.0; +https://github.com/)"
+_URL_RE = re.compile(r'https?://[^\s<>"\'\])}]+')
+
+
+def urls_in_text(text: str) -> set:
+    """Every http(s) URL a piece of text mentions, stripped of trailing
+    punctuation. Provenance for web_fetch: only URLs the conversation (or a
+    search result) actually brought up are fetchable."""
+    if not text:
+        return set()
+    return {u.rstrip(".,;:!?") for u in _URL_RE.findall(str(text))}
+
+
+def allowed_urls_from_messages(messages) -> set:
+    """URLs from user messages only. A tool_result rides in a user-role
+    message too, so those blocks are excluded: a URL the bot printed or
+    read from a file must not become fetchable (0.15.0)."""
+    allowed = set()
+    for msg in messages or []:
+        if msg.get("role") != "user" or msg.get("message_type") == "tool_result":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            allowed |= urls_in_text(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    allowed |= urls_in_text(block.get("text", ""))
+    return allowed
 
 
 def _ddg_search_sync(query: str) -> list:
@@ -92,12 +120,17 @@ async def execute_web_search(query: str, api_key: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-async def execute_web_fetch(url: str) -> str:
+async def execute_web_fetch(url: str, allowed_urls: Optional[set] = None) -> str:
     if not url or not url.strip():
         return "Error: url is required"
     url = url.strip()
     if not (url.startswith("http://") or url.startswith("https://")):
         return "Error: url must start with http:// or https://"
+    if allowed_urls is not None and url.rstrip(".,;:!?") not in allowed_urls:
+        return (
+            "Error: that URL wasn't mentioned in a message or returned by "
+            "web_search - only those are fetchable."
+        )
 
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:

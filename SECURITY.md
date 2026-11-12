@@ -128,6 +128,8 @@ Bot memories are stored as plaintext Markdown files in the `memories/` directory
 ### Web Search & External Content
 The bot can fetch and display external web content, which creates potential phishing vectors. The bot includes citation display to show content sources—review these before trusting search results.
 
+`web_fetch` (client-side, like `web_search`) only fetches URLs that appeared in a user message or in a `web_search` result from the same turn. URLs that exist only in a tool result are refused, so the bot cannot launder a URL it printed or read from a file into an outbound request. Residual risk: some user turns contain the bot's own words relayed (context summaries, note-driven turns), so a URL laundered through one of those is fetchable a turn later. Leave web search off where that matters.
+
 ## Security Hardening Recommendations
 
 ### Development Environments

@@ -236,6 +236,9 @@ class EpisodeManager:
         self.llm = llm_client
         self.default_model = default_model
         self._locks: dict = {}
+        # Shared per-channel turn locks, attached by ReactiveEngine so an
+        # episode reseed can't land between a turn's tool pairs and its reply.
+        self.channel_locks = None
         # Distillation-failure cooldowns: the usage trigger re-fires every
         # turn while over threshold, which would re-attempt (and re-bill) a
         # failing distillation once per message
@@ -244,6 +247,8 @@ class EpisodeManager:
         logger.info("EpisodeManager initialized")
 
     def _lock_for(self, channel_id: str) -> asyncio.Lock:
+        if self.channel_locks is not None:
+            return self.channel_locks.lock(channel_id)
         if channel_id not in self._locks:
             self._locks[channel_id] = asyncio.Lock()
         return self._locks[channel_id]

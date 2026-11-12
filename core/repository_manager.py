@@ -211,6 +211,10 @@ class RepositoryManager:
         """
         action = tool_input.get("action", "")
         try:
+            # The tool isn't offered in DMs, but a model can name any tool: a
+            # DM has no repository, and nothing here should create a fake one.
+            if current_server_id in (None, "DM"):
+                return "Error: There's no repository in DMs."
             if (self.vaults and action in ("save_file", "save_attachment")
                     and self.vaults.blocks_repository_save(current_server_id, current_channel_id)):
                 return ("Error: This channel is vaulted - what happens here stays here, "

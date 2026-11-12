@@ -9,12 +9,40 @@ discretion-norms prompt.
 """
 
 import logging
+import posixpath
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Memory tool commands that write
 _WRITE_COMMANDS = {"create", "str_replace", "insert", "delete", "rename"}
+
+
+def normalize_memory_path(path: str) -> str:
+    """The path a memory command really touches: '..' and '.' resolved,
+    backslashes (a separator on Windows) treated as slashes."""
+    return posixpath.normpath(path.replace("\\", "/"))
+
+
+def memory_path_problem(path: str) -> Optional[str]:
+    """Why a (normalized) memory path can't be judged by its spelling, or
+    None. Windows resolves more spellings than the one written: an 8.3 short
+    name (`142494~1.MD` for a vaulted channel's note), an alternate data
+    stream (`x.md:s`), a trailing dot or space it drops. The gates compare
+    names, so a path that could name a different file is refused."""
+    for seg in path.split("/"):
+        if seg in (".", ".."):
+            continue
+        if "~" in seg or ":" in seg or seg.endswith((".", " ")):
+            return f"{seg!r} isn't a plain file or folder name"
+    return None
+
+
+def path_parts(path: str) -> List[str]:
+    """A memory path's segments for the gates' comparisons, case-folded:
+    the filesystems the app ships on ignore case, so `Servers/` reaches
+    `servers/` (0.15.0; before, it skipped every vault and DM rule)."""
+    return path.casefold().split("/")
 
 
 class VaultEnforcer:
@@ -66,9 +94,25 @@ class VaultEnforcer:
         return bool(excluded & content)
 
     def blocks_repository_save(self, server_id, channel_id) -> bool:
-        """Saving from a vaulted CHANNEL into the server-visible repo would leak.
-        A vaulted SERVER's repo is inside the vault - fine."""
-        return str(channel_id or "") in self.vaults
+        """Saving from a vaulted CHANNEL (or a thread of one) into the
+        server-visible repo would leak. A vaulted SERVER's repo is inside the
+        vault - fine."""
+        return bool((self._context_ids(server_id, channel_id) - {str(server_id)}) & self.vaults)
+
+    def _thread_parent(self, channel_id, parent_id=None) -> Optional[str]:
+        if parent_id:
+            return str(parent_id)
+        if channel_id and self.thread_parent_resolver:
+            return self.thread_parent_resolver(str(channel_id))
+        return None
+
+    def innermost_vault(self, server_id, channel_id, parent_id=None) -> Optional[str]:
+        """The vault this context lives in, innermost first: a vaulted thread,
+        then its vaulted parent channel, then a vaulted server."""
+        for place in (channel_id, self._thread_parent(channel_id, parent_id), server_id):
+            if place and str(place) in self.vaults:
+                return str(place)
+        return None
 
     def _check_dm_memory(self, path: str, command: str,
                          server_id, channel_id,
@@ -76,7 +120,7 @@ class VaultEnforcer:
         """DM privacy rules (v0.9): every DM is an implicit vault scoped to
         its conversation. Returns a verdict, or None when DM rules have no
         opinion (server vault rules still apply)."""
-        parts = path.split("/")
+        parts = path_parts(path)
         is_dm_path = len(parts) >= 5 and parts[3] == "global" and parts[4] == "dms"
         in_dm = server_id in (None, "DM")
 
@@ -113,6 +157,7 @@ class VaultEnforcer:
         """Gate one memory-tool call. Returns (allowed, reason_if_denied).
         write_grant (v0.9): one-shot /memory consent - the named user's own
         global profile becomes writable from their DM, nothing else."""
+        path = normalize_memory_path(path)
         # DM privacy is mechanical and holds even with no vaults configured
         dm_verdict = self._check_dm_memory(path, command, server_id, channel_id,
                                            write_grant=write_grant)
@@ -122,7 +167,7 @@ class VaultEnforcer:
         if not self.vaults:
             return True, None
 
-        parts = path.split("/")
+        parts = path_parts(path)
         # /memories/{bot}/servers/{sid}/... -> ['', 'memories', bot, 'servers', sid, ...]
         if len(parts) >= 5 and parts[3] == "servers":
             sid = parts[4]
@@ -161,4 +206,35 @@ class VaultEnforcer:
                 "keep person-notes in this server's channel notes instead"
             )
 
+        if command in _WRITE_COMMANDS and not self._inside_own_vault_tree(
+                parts, server_id, channel_id):
+            return False, "that's outside this vault - notes made here stay here"
+
         return True, None
+
+    def _inside_own_vault_tree(self, parts: List[str], server_id, channel_id) -> bool:
+        """From inside a vault, writes stay in that vault's own tree; the
+        innermost vault wins (a vaulted channel in a vaulted server keeps its
+        notes in the channel's tree, out of the rest of the server's reach).
+        True when the context is in no vault at all."""
+        innermost = self.innermost_vault(server_id, channel_id)
+        if innermost is None:
+            return True
+        # parts: ['', 'memories', bot, 'servers', sid, ...rest]
+        if len(parts) < 6 or parts[3] != "servers" or parts[4] != str(server_id):
+            return False
+        rest = parts[5:]
+        if rest == ["followups.json"]:
+            return True   # follow-ups are server-level by design (SECURITY.md residual)
+        if innermost == str(server_id):
+            return True   # a vaulted server: its whole tree
+        if rest[0] != "channels" or len(rest) < 2:
+            return False
+        names = [n.replace(".md", "").replace("_stats.json", "") for n in rest[1:]]
+        parent = self._thread_parent(channel_id)
+        if innermost == str(channel_id) and parent:
+            # a vaulted thread: channels/{parent}/threads/{T}[.md|/...] only,
+            # even when its parent channel is a vault too
+            return names[:3] == [parent, "threads", innermost]
+        # a vaulted channel: channels/{C}[.md|_stats.json|/...]
+        return names[0] == innermost

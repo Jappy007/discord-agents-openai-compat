@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import re
+import types
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, List, Optional, TYPE_CHECKING
@@ -109,17 +110,53 @@ class _SyntheticDMMessage:
         self.created_at = datetime.now(timezone.utc)
 
 
+class _NullAsyncLock:
+    """Placeholder for the old bot-wide response semaphore. Channel locks
+    now hold the whole turn (see ChannelLocks); model calls have their own
+    bot-wide slot limit in _run_tool_loop."""
+
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+_USAGE_FIELDS = (
+    "input_tokens", "output_tokens",
+    "cache_read_input_tokens", "cache_creation_input_tokens",
+)
+
+
+def _accumulate_usage(total, usage):
+    """Add one response's usage to a turn total (0.13.1). Every model call in
+    a tool loop counts toward the turn's cost, not just the last one."""
+    if usage is None:
+        return total
+    if total is None:
+        total = types.SimpleNamespace(**{k: 0 for k in _USAGE_FIELDS})
+    for key in _USAGE_FIELDS:
+        setattr(total, key, getattr(total, key, 0) + (getattr(usage, key, 0) or 0))
+    return total
+
+
 @dataclass
 class ToolLoopResult:
     """Outcome of one full tool-use loop (one bot turn)."""
     response_text: str = ""
     tools_were_used: bool = False
     usage: Any = None  # usage of the final response in the loop
+    total_usage: Any = None  # sum of every model call in this turn (0.13.1)
     tool_calls: List[dict] = field(default_factory=list)  # {tool, action, detail} per call (v0.9)
     # Native messaging (v0.12.0): messages the model sent via send_message
     sent_message_ids: List[str] = field(default_factory=list)
+    sent_texts: List[str] = field(default_factory=list)  # what send_message posted (0.14.0)
     last_sent_message: Any = None  # discord.Message, for engagement tracking
     consumed_local_files: set = field(default_factory=set)  # local attachments, don't re-send
+    # A send_message actually posted: trailing final text is a duplicate and
+    # is dropped (0.13.1). False after a failed send or tool work only.
+    ended_on_send: bool = False
+    dropped_text_chars: int = 0
     # Explicit silence: the model called stay_silent. Any final text is
     # private reasoning and must never be posted.
     stayed_silent: bool = False
@@ -240,8 +277,12 @@ class ReactiveEngine:
         # Track background tasks for clean shutdown
         self._background_tasks = set()
 
-        # Prevent concurrent responses (fixes multiple responses to single mention)
-        self._response_semaphore = asyncio.Semaphore(1)
+        # Prevent concurrent responses in one channel, while letting other
+        # channels proceed side by side (0.13.1). Model calls keep their own
+        # bot-wide slot limit below.
+        from .channel_locks import ChannelLocks
+        self.channel_locks = ChannelLocks()
+        self._model_semaphore = asyncio.Semaphore(3)
 
         # Track messages that have been responded to (prevent race condition)
         # Using deque with maxlen to automatically discard old entries
@@ -297,6 +338,7 @@ class ReactiveEngine:
                 llm_client=self.llm,
                 default_model=self.config.api.model,
             )
+            self.episode_manager.channel_locks = self.channel_locks
 
         # Initialize MCP Manager (discover tools from servers)
         if self.mcp_manager:
@@ -577,7 +619,9 @@ class ReactiveEngine:
         await self._register_dm_surface(channel)
 
         loop_result.sent_message_ids.append(str(sent.id))
+        loop_result.sent_texts.append(content)
         loop_result.last_sent_message = sent
+        loop_result.ended_on_send = True
 
         attached = [f.filename for f in outgoing_files]
         report = f"Sent (message id {sent.id})."
@@ -895,12 +939,15 @@ class ReactiveEngine:
 
     @staticmethod
     def _event_payload(result: "ToolLoopResult", triggers: list, **extra) -> dict:
-        usage = result.usage
+        usage = result.total_usage or result.usage
         return {
             "triggers": triggers,
             "thinking": "",
             "tool_calls": result.tool_calls,
-            "response": result.response_text or None,
+            # What actually reached the channel, even when it went through
+            # send_message rather than the final text path (0.14.0).
+            "response": (result.response_text
+                         or ("\n".join(result.sent_texts) if result.sent_texts else None)),
             "tokens": {
                 "uncached_in": getattr(usage, "input_tokens", 0) or 0,
                 "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
@@ -931,7 +978,8 @@ class ReactiveEngine:
                                    conversation_state,
                                    tool_calls_log: list = None,
                                    memory_write_grant: Optional[str] = None,
-                                   loop_result: Optional[ToolLoopResult] = None):
+                                   loop_result: Optional[ToolLoopResult] = None,
+                                   allowed_urls: Optional[set] = None):
         """
         Execute the client-side tool_use blocks in a response.
 
@@ -1094,10 +1142,14 @@ class ReactiveEngine:
                 })
 
             elif block.name == "web_search":
-                from tools.client_web_tools import execute_web_search
+                from tools.client_web_tools import execute_web_search, urls_in_text
                 query = block.input.get("query", "")
                 note("web_search", "search", query)
                 result = await execute_web_search(query)
+                # Search results are a legitimate provenance source for a
+                # follow-up web_fetch in this same turn.
+                if allowed_urls is not None:
+                    allowed_urls |= urls_in_text(result)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -1108,7 +1160,7 @@ class ReactiveEngine:
                 from tools.client_web_tools import execute_web_fetch
                 url = block.input.get("url", "")
                 note("web_fetch", "fetch", url)
-                result = await execute_web_fetch(url)
+                result = await execute_web_fetch(url, allowed_urls=allowed_urls)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -1190,6 +1242,12 @@ class ReactiveEngine:
         """
         result = ToolLoopResult()
         loop_iteration = 0
+        # web_fetch provenance (0.15.0): URLs from user turns (never tool
+        # results) plus web_search results as they happen this turn.
+        from tools.client_web_tools import allowed_urls_from_messages, urls_in_text
+        allowed_urls = allowed_urls_from_messages(
+            getattr(conversation_state, "messages", []))
+        allowed_urls |= urls_in_text(getattr(message, "content", "") or "")
         attachment_nudges = 0  # phantom-attachment guard, max 2 bounces per turn
         repeat_sig = None  # repeat-call guard: identical consecutive tool calls
         repeat_count = 0
@@ -1204,15 +1262,17 @@ class ReactiveEngine:
             logger.debug(f"API params{log_suffix}: model={api_params.get('model')}")
             logger.debug(f"  Tools: {[t.get('name') or t.get('type') for t in api_params.get('tools', [])]}")
 
-            async with self.llm.beta.messages.stream(
-                **{
-                    **api_params,
-                    "messages": api_params["messages"] + tail_messages,
-                }
-            ) as api_stream:
-                response = await api_stream.get_final_message()
+            async with self._model_semaphore:
+                async with self.llm.beta.messages.stream(
+                    **{
+                        **api_params,
+                        "messages": api_params["messages"] + tail_messages,
+                    }
+                ) as api_stream:
+                    response = await api_stream.get_final_message()
 
             result.usage = getattr(response, "usage", None)
+            result.total_usage = _accumulate_usage(result.total_usage, result.usage)
 
             self.conversation_logger.log_tool_use_loop(loop_iteration, response.stop_reason)
             self._log_response_blocks(response, log_suffix)
@@ -1240,6 +1300,7 @@ class ReactiveEngine:
                     tool_calls_log=result.tool_calls,
                     memory_write_grant=memory_write_grant,
                     loop_result=result,
+                    allowed_urls=allowed_urls,
                 )
 
                 # Repeat-call guard (0.12.3): the gif saga showed the model
@@ -1326,6 +1387,17 @@ class ReactiveEngine:
                 if result.stayed_silent or result.reaction_used:
                     result.response_text = ""
                     break
+
+                # Send guard (0.13.1): a turn that already posted through
+                # send_message doesn't get a second trailing post. Count what
+                # was dropped; a failed send never sets ended_on_send.
+                if result.ended_on_send and result.response_text.strip():
+                    result.dropped_text_chars += len(result.response_text)
+                    logger.info(
+                        f"Dropping {len(result.response_text)} chars of trailing "
+                        f"text after send_message{log_suffix}"
+                    )
+                    result.response_text = ""
 
                 # Tools ran but the model went quiet: reprompt once for a
                 # brief confirmation (unless it already sent via send_message
@@ -1574,6 +1646,11 @@ class ReactiveEngine:
     # ========== URGENT PATH (@mentions) ==========
 
     async def handle_urgent(self, message: discord.Message):
+        """Handle urgent message (@mention), one turn per channel at a time."""
+        async with self.channel_locks.lock(message.channel.id):
+            return await self._handle_urgent_locked(message)
+
+    async def _handle_urgent_locked(self, message: discord.Message):
         """
         Handle urgent message (@mention) immediately.
 
@@ -1589,6 +1666,16 @@ class ReactiveEngine:
         self._responded_messages.append(message.id)
 
         channel_id = str(message.channel.id)
+
+        # A mention ingests older pending messages for its channel first
+        # (0.13.1): the reply should see what was said before it, oldest-first.
+        for pending_id in self._claim_pending_for_channel(channel_id,
+                                                          exclude={message.id}):
+            try:
+                await self._process_message_to_state(channel_id, pending_id)
+            except Exception as e:
+                logger.error(f"Error ingesting pending message {pending_id} "
+                             f"for mention in {channel_id}: {e}", exc_info=True)
 
         # Load or create conversation state for this channel (v0.5.0)
         conversation_state = None
@@ -1627,7 +1714,7 @@ class ReactiveEngine:
 
         try:
             # Context is built inside the semaphore so each message gets isolated context
-            async with self._response_semaphore:
+            async with _NullAsyncLock():
                 # Exclude messages currently being processed to prevent seeing
                 # other pending @mentions
                 context = await self.context_builder.build_context(
@@ -1765,6 +1852,11 @@ class ReactiveEngine:
             )
 
     async def handle_memory_command(self, channel, user, kind: str, text: str) -> None:
+        """Serialize /memory against other turns in this DM channel."""
+        async with self.channel_locks.lock(channel.id):
+            return await self._handle_memory_command_locked(channel, user, kind, text)
+
+    async def _handle_memory_command_locked(self, channel, user, kind: str, text: str) -> None:
         """
         /memory show|remember|forget|feedback - the consent gate through the
         DM vault (v0.9, spec §2). The handler never writes files itself:
@@ -1812,7 +1904,7 @@ class ReactiveEngine:
             content=f"/memory {kind} {text}".strip(), is_mention=True)
 
         try:
-            async with self._response_semaphore:
+            async with _NullAsyncLock():
                 context = await self.context_builder.build_context(synthetic)
 
                 if conversation_state:
@@ -2052,26 +2144,27 @@ class ReactiveEngine:
 
                 logger.debug(f"Processing {len(messages_to_check)} pending messages")
 
-                # PHASE 1: Process all messages (add to conversation state)
-                # Collect the weighed messages per channel - they become the
-                # scan/silent turn-event triggers (v0.9)
-                channel_triggers: dict = {}
+                # Group by channel so ingestion + one scan for that channel
+                # happen under its channel lock (0.13.1/0.15.3). Other
+                # channels can still proceed independently.
+                by_channel: dict = {}
                 for channel_id, message_id in messages_to_check:
-                    try:
-                        trigger = await self._process_message_to_state(channel_id, message_id)
-                        if trigger:
-                            channel_triggers.setdefault(channel_id, []).append(trigger)
-                    except Exception as e:
-                        logger.error(f"Error processing message {message_id} in channel {channel_id}: {e}", exc_info=True)
+                    by_channel.setdefault(channel_id, []).append(message_id)
 
-                logger.debug(f"Phase 1 complete: {len(channel_triggers)} channels with updates")
-
-                # PHASE 2: Make one response decision per channel
-                for channel_id, triggers in channel_triggers.items():
+                for channel_id, message_ids in by_channel.items():
                     try:
-                        await self._decide_channel_response(channel_id, triggers)
+                        async with self.channel_locks.lock(channel_id):
+                            triggers = []
+                            for message_id in message_ids:
+                                trigger = await self._process_message_to_state(
+                                    channel_id, message_id)
+                                if trigger:
+                                    triggers.append(trigger)
+                            if triggers:
+                                await self._decide_channel_response_locked(
+                                    channel_id, triggers)
                     except Exception as e:
-                        logger.error(f"Error deciding response for channel {channel_id}: {e}", exc_info=True)
+                        logger.error(f"Error processing channel {channel_id}: {e}", exc_info=True)
 
         except asyncio.CancelledError:
             logger.info("Periodic check loop cancelled")
@@ -2159,6 +2252,11 @@ class ReactiveEngine:
             return None
 
     async def _decide_channel_response(self, channel_id: str, triggers: list = None):
+        """Serialize a scan/reply against other turns in this channel."""
+        async with self.channel_locks.lock(channel_id):
+            return await self._decide_channel_response_locked(channel_id, triggers)
+
+    async def _decide_channel_response_locked(self, channel_id: str, triggers: list = None):
         """
         Make response decision for a channel (Phase 2 of periodic check).
 
@@ -2312,7 +2410,7 @@ class ReactiveEngine:
             self.conversation_logger.log_context_building(**context["stats"])
 
         # Prevent concurrent responses
-        async with self._response_semaphore:
+        async with _NullAsyncLock():
             system_blocks = self._build_response_decision_prompt(context)
             # Momentum is recomputed every check - volatile tail, not system
             volatile_tail = await self._build_volatile_tail(
@@ -2505,6 +2603,22 @@ DO NOT explain your reasoning for responding or not responding. DO NOT output me
             }
         ]
 
+    def _claim_pending_for_channel(self, channel_id: str,
+                                   exclude: set = None) -> List[int]:
+        """Remove and return this channel's queued message ids, oldest-first.
+        One atomic pass: no await between reading and rebuilding the deque."""
+        exclude = exclude or set()
+        mine = [mid for cid, mid in self.pending_messages
+                if cid == channel_id and mid not in exclude]
+        if not mine:
+            return []
+        keep = deque(self.pending_messages.maxlen)
+        for cid, mid in self.pending_messages:
+            if cid != channel_id or mid in exclude:
+                keep.append((cid, mid))
+        self.pending_messages = keep
+        return sorted(mine)
+
     def add_pending_message(self, channel_id: str, message_id: int):
         """
         Add message to pending list for periodic check.
@@ -2535,29 +2649,30 @@ DO NOT explain your reasoning for responding or not responding. DO NOT output me
         try:
             await asyncio.sleep(delay)
 
-            # Claim this channel's pending entries (no await between the two
-            # deque operations - atomic on the event loop). Rebuild in place
-            # to keep the deque type and its maxlen bound intact.
-            mine = [p for p in self.pending_messages if p[0] == channel_id]
-            if not mine:
-                return  # periodic loop already handled them
-            keep = deque(self.pending_messages.maxlen)
-            for p in self.pending_messages:
-                if p[0] != channel_id:
-                    keep.append(p)
-            self.pending_messages = keep
+            async with self.channel_locks.lock(channel_id):
+                # Claim this channel's pending entries (no await between the
+                # two deque operations - atomic on the event loop). Rebuild in
+                # place to keep the deque type and its maxlen bound intact.
+                mine = [p for p in self.pending_messages if p[0] == channel_id]
+                if not mine:
+                    return  # periodic loop already handled them
+                keep = deque(self.pending_messages.maxlen)
+                for p in self.pending_messages:
+                    if p[0] != channel_id:
+                        keep.append(p)
+                self.pending_messages = keep
 
-            triggers = []
-            for cid, message_id in mine:
-                try:
-                    trigger = await self._process_message_to_state(cid, message_id)
-                    if trigger:
-                        triggers.append(trigger)
-                except Exception as e:
-                    logger.error(f"Expedited scan: error processing message {message_id}: {e}", exc_info=True)
+                triggers = []
+                for cid, message_id in mine:
+                    try:
+                        trigger = await self._process_message_to_state(cid, message_id)
+                        if trigger:
+                            triggers.append(trigger)
+                    except Exception as e:
+                        logger.error(f"Expedited scan: error processing message {message_id}: {e}", exc_info=True)
 
-            if triggers:
-                await self._decide_channel_response(channel_id, triggers)
+                if triggers:
+                    await self._decide_channel_response_locked(channel_id, triggers)
         except Exception as e:
             logger.error(f"Expedited scan failed for channel {channel_id}: {e}", exc_info=True)
         finally:
