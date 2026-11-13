@@ -59,10 +59,15 @@ Legend: [ ] pending · [~] in progress · [x] done
 
 ## Phase 7 — Skills
 
-- [ ] 7.1 `core/skills.py`
-- [ ] 7.2 `tools/skills_tool.py` + tool wiring
-- [ ] 7.3 Copy text-only skills
-- [ ] 7.4 Bundle `skills/`
+- [x] 7.1 `core/skills.py`
+- [x] 7.2 `tools/skills_tool.py` + tool wiring
+- [x] 7.3 Copy text-only skills
+- [x] 7.4 Bundle `skills/`
+
+> Fork note: upstream v0.15.7 unmarks the two fiction guides (their bodies read
+> workshop reference files). This fork has no workshop, so they are marked
+> `text-only: true` to keep the plan's "work today" behaviour; the other four
+> skill folders remain workshop-only.
 
 ## Phase 8 — Workshop sandbox (optional)
 

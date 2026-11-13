@@ -40,11 +40,13 @@ from .mcp_manager import MCPManager
 from .unified_attachment_manager import UnifiedAttachmentManager
 from .vaults import VaultEnforcer
 from .conversation_state_manager import ConversationStateManager
+from .skills import SkillCatalog
 from .internal_constants import (
     TOOL_STUB_KEEP_TURNS, PRIME_CONTEXT_TEMPLATE, format_size, model_max_output,
     RECENT_MAP_MIN,
 )
 from tools.discord_tools import DiscordToolExecutor, get_discord_tools
+from tools.skills_tool import run_request_skill, SKILL_READ_TOOL, SKILL_REQUEST_TOOL
 from core.local_attachment_store import LocalAttachmentStore
 
 logger = logging.getLogger(__name__)
@@ -244,6 +246,15 @@ class ReactiveEngine:
             bot_id=config.bot_id,
             vaults=self.vaults,
         )
+
+        # Skills (0.14): local folders under skills/. There is no workshop in
+        # this fork, so only text-only skills are ever offered. The path is
+        # relative to the data root when one exists there (operators can drop
+        # in their own), else to the framework checkout/bundle.
+        skills_dir = Path(config.get_skills_config()["skills_dir"])
+        if not skills_dir.is_absolute() and not skills_dir.exists():
+            skills_dir = Path(__file__).resolve().parents[1] / skills_dir
+        self.skills = SkillCatalog(skills_dir, config.skills.default_skills)
 
         self.context_builder = ContextBuilder(
             config=config,
@@ -861,6 +872,16 @@ class ReactiveEngine:
         from .memory_tool_executor import MEMORY_TOOL_SCHEMA
         tools = [MEMORY_TOOL_SCHEMA]
 
+        # Skills (0.14): the catalog joins the cached system prefix; only
+        # text-only skills are offered without a workshop. The list is stable
+        # per bot, so it belongs in the cached system block, not the tail.
+        workshop = False
+        skills_prompt = self.skills.prompt(workshop=workshop)
+        if skills_prompt and system_blocks:
+            system_blocks[0]["text"] += "\n\n" + skills_prompt
+        if skills_prompt:
+            tools.append(SKILL_REQUEST_TOOL if workshop else SKILL_READ_TOOL)
+
         if self.discord_tool_executor:
             tools.extend(get_discord_tools())
         else:
@@ -1124,6 +1145,18 @@ class ReactiveEngine:
                     result = await self.pptx_builder.execute(block.input)
                 else:
                     result = "create_pptx isn't available in this context."
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result
+                })
+
+            # Skills (0.14): read one text-only skill's guide on demand. MUST
+            # precede the MCP "_" fallthrough.
+            elif block.name == "request_skill":
+                logger.info(f"Executing request_skill tool: {block.input.get('skill_name', 'unknown')}")
+                note("skills", "request_skill", block.input.get("skill_name", ""))
+                result = run_request_skill(self.skills, block.input, workshop=False)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,

@@ -22,7 +22,7 @@ const RUNTIME = path.join(BUNDLE, "runtime", "python");
 const FRAMEWORK = path.join(BUNDLE, "framework");
 
 const FRAMEWORK_ITEMS = [
-  "core", "tools", "supervisor",
+  "core", "tools", "supervisor", "skills",
   "bot_manager.py", "supervisor.py", "deployment_tool.py",
   "requirements.txt", "README.md", "CHANGELOG.md",
 ];

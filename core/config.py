@@ -134,6 +134,16 @@ class AttachmentsConfig:
 
 
 @dataclass
+class SkillsConfig:
+    """Skills are local folders under skills/, always available (0.14).
+
+    default_skills are preloaded into the system prompt; any other skill can
+    be read on demand with request_skill.
+    """
+    default_skills: List[str] = field(default_factory=list)
+
+
+@dataclass
 class LoggingConfig:
     """Logging configuration"""
     level: str = "INFO"
@@ -207,6 +217,7 @@ class BotConfig:
     mcp: MCPConfig = field(default_factory=MCPConfig)
     vaults: List[str] = field(default_factory=list)  # channel/server IDs whose content never leaves them
     attachments: AttachmentsConfig = field(default_factory=AttachmentsConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
 
     @classmethod
     def load(cls, yaml_path: Path) -> 'BotConfig':
@@ -409,6 +420,12 @@ class BotConfig:
             ),
         )
 
+        # Parse skills config (0.14) - local folders under skills/
+        skills_data = data.get("skills", {}) or {}
+        skills = SkillsConfig(
+            default_skills=list(skills_data.get("default_skills") or []),
+        )
+
         # Parse minecraft config
         minecraft_data = data.get("minecraft", {})
         minecraft = MinecraftConfig(
@@ -440,6 +457,7 @@ class BotConfig:
             mcp=mcp,
             vaults=[str(v) for v in (data.get("vaults") or [])],
             attachments=attachments,
+            skills=skills,
         )
 
     def validate(self) -> List[str]:
@@ -543,6 +561,13 @@ class BotConfig:
             },
             "ignore_threshold": IGNORE_THRESHOLD,
             "engagement_tracking_delay": ENGAGEMENT_TRACKING_DELAY_SECONDS,
+        }
+
+    def get_skills_config(self):
+        """Get full skills configuration with internal values (0.14)."""
+        return {
+            "enabled": True,      # always enabled
+            "skills_dir": "skills",
         }
 
     def get_mcp_config(self):

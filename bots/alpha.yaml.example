@@ -125,6 +125,15 @@ attachments:
     enabled: true
 
 # ============================================================
+# SKILLS
+# ============================================================
+# Local instruction packages in skills/, each a folder with a SKILL.md.
+# Text-only guides (the bundled storytelling and fiction-criticism) are
+# listed in the system prompt; the bot reads one with request_skill.
+skills:
+  default_skills: []   # preloaded at conversation start
+
+# ============================================================
 # VAULTS
 # ============================================================
 # Channel or server IDs whose content never leaves them: excluded from
