@@ -9,6 +9,8 @@ import asyncio
 import logging
 from typing import Optional, TYPE_CHECKING
 
+from .internal_constants import BOT_CHAIN_LIMIT
+
 if TYPE_CHECKING:
     from .config import BotConfig
     from .reactive_engine import ReactiveEngine
@@ -317,14 +319,17 @@ class DiscordClient(discord.Client):
 
         # Check for crash and insert lifecycle events
         from pathlib import Path
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         flag_file = Path(f"persistence/{self.config.bot_id}_running.flag")
 
         if flag_file.exists():
             # Previous session crashed (flag wasn't removed)
             try:
-                offline_time = datetime.fromtimestamp(flag_file.stat().st_mtime)
+                # Naive UTC like every other lifecycle marker: local time sorted
+                # it after the next "came online" east of UTC
+                offline_time = datetime.fromtimestamp(
+                    flag_file.stat().st_mtime, timezone.utc).replace(tzinfo=None)
                 logger.warning(f"Detected crash: Bot went offline at {offline_time}")
 
                 # Insert crash/offline tag for each channel in each server
@@ -510,6 +515,19 @@ class DiscordClient(discord.Client):
         except Exception as e:
             logger.error(f"Failed to track bot attachments in conversation state: {e}", exc_info=True)
 
+    async def _bot_run(self, channel_id: str) -> int:
+        """How many of the channel's newest stored messages, in a row, are
+        from bots (this one included); lifecycle markers don't count."""
+        run = 0
+        for m in reversed(await self.message_memory.get_recent(
+                channel_id, limit=BOT_CHAIN_LIMIT + 4)):
+            if m.is_system:
+                continue
+            if not m.is_bot:
+                break
+            run += 1
+        return run
+
     async def on_message(self, message: discord.Message):
         """
         New message received.
@@ -682,6 +700,16 @@ class DiscordClient(discord.Client):
                     pass
 
         else:
+            # Two bots that each scan-answer the other never stop: past the
+            # limit, unaddressed bot chatter gets no scan until a person
+            # speaks (an explicit @mention from a bot is still answered)
+            if message.author.bot:
+                run = await self._bot_run(str(message.channel.id))
+                if run >= BOT_CHAIN_LIMIT:
+                    logger.info(f"Not scanning {message.author.name} in "
+                                f"#{getattr(message.channel, 'name', 'DM')}: {run} bot messages in "
+                                f"a row - waiting for a person")
+                    return
             # Non-urgent message - add to pending for periodic check
             # Bug #7 fix: Track individual message IDs, not just channel IDs
             channel_id = str(message.channel.id)

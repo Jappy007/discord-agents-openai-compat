@@ -53,6 +53,25 @@ IGNORE_THRESHOLD = 5  # Consecutive ignores before silence
 
 
 # =============================================================================
+# SILENCE / HISTORY (0.15.x, Internal)
+# =============================================================================
+# How a turn that may stay quiet says so. Models reaching for it also write
+# <silence/>, <silent> or </silent>: the whole reply being one such tag is
+# silence (see SILENT_FORMS in reactive_engine).
+SILENT_REPLY = "<silent/>"
+
+# The <recent_messages> map on the request tail is the only place the model
+# learns who said what: conversation turns are the bare message text. Cover at
+# least this many messages, and as many as the conversation can hold.
+RECENT_MAP_MIN = 15
+
+# Two bots that each answer the other never stop on their own. Past this many
+# bot messages in a row, another bot's unaddressed message gets no scan until
+# a person speaks; an explicit @mention from a bot is still answered.
+BOT_CHAIN_LIMIT = 6
+
+
+# =============================================================================
 # MCP (Internal)
 # =============================================================================
 MCP_CONFIG_FILE = "mcp_servers.json"

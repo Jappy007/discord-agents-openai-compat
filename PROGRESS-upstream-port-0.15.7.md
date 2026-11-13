@@ -31,14 +31,14 @@ Legend: [ ] pending · [~] in progress · [x] done
 
 ## Phase 4 — Conversation history and seeding
 
-- [ ] 4.1 `MessageMemory.get_recent()` options
-- [ ] 4.2 Seed deduplication
-- [ ] 4.3 `ConversationState.held`
-- [ ] 4.4 Recent-message map
-- [ ] 4.5 Lifecycle markers
-- [ ] 4.6 Message cap
-- [ ] 4.7 Bot chain limit
-- [ ] 4.8 Silent near-miss guard
+- [x] 4.1 `MessageMemory.get_recent()` options
+- [x] 4.2 Seed deduplication
+- [x] 4.3 `ConversationState.held`
+- [x] 4.4 Recent-message map
+- [x] 4.5 Lifecycle markers
+- [x] 4.6 Message cap
+- [x] 4.7 Bot chain limit
+- [x] 4.8 Silent near-miss guard
 
 ## Phase 5 — Lifecycle, reconnect, clean stop
 

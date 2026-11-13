@@ -586,41 +586,39 @@ class MessageMemory:
             logger.debug(f"System message already exists: {message_id}")
 
     async def get_recent(
-        self, channel_id: str, limit: int = 20, exclude_message_ids: List[int] = None
+        self, channel_id: str, limit: int = 20, exclude_message_ids: List[int] = None,
+        before_message_id: Optional[int] = None, collapse_markers: bool = False,
+        real_only: bool = False,
     ) -> List[StoredMessage]:
         """
         Get recent messages from channel, ordered chronologically.
 
-        Optionally exclude specific message IDs (e.g., to filter in-flight messages).
+        Optionally exclude specific message IDs (e.g., to filter in-flight
+        messages), or everything from before_message_id on. collapse_markers
+        keeps only the newest of each run of lifecycle markers: every boot and
+        shutdown marks every channel, so a quiet channel's recent rows can be
+        nothing else, and a run says one thing - the bot was away. It reads
+        the channel's whole history (a window can't stop at the limit): for
+        seeds, not per request. real_only leaves lifecycle markers out.
         """
         if not self._db:
             raise RuntimeError("MessageMemory not initialized. Call initialize() first.")
 
-        # Build query with optional exclusion filter
-        if exclude_message_ids and len(exclude_message_ids) > 0:
-            excluded_ids_str = [str(mid) for mid in exclude_message_ids]
-            placeholders = ",".join("?" * len(excluded_ids_str))
-
-            cursor = await self._db.execute(
-                f"""
-                SELECT m.* FROM messages m
-                WHERE channel_id = ?
-                AND message_id NOT IN ({placeholders})
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (channel_id, *excluded_ids_str, limit),
-            )
-        else:
-            cursor = await self._db.execute(
-                """
-                SELECT m.* FROM messages m
-                WHERE channel_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (channel_id, limit),
-            )
+        where, params = ["channel_id = ?"], [channel_id]
+        if exclude_message_ids:
+            where.append(f"message_id NOT IN ({','.join('?' * len(exclude_message_ids))})")
+            params += [str(mid) for mid in exclude_message_ids]
+        if before_message_id is not None:
+            # Snowflakes order by time; stored as text, so compare as numbers
+            where.append("CAST(message_id AS INTEGER) < ?")
+            params.append(int(before_message_id))
+        if real_only:
+            where.append("is_system = 0")
+        rows = f"SELECT * FROM messages WHERE {' AND '.join(where)}"
+        if collapse_markers:
+            rows = (f"SELECT * FROM (SELECT *, LEAD(is_system, 1, 0) OVER (ORDER BY timestamp) AS next_system"
+                    f" FROM ({rows})) WHERE NOT (is_system = 1 AND next_system = 1)")
+        cursor = await self._db.execute(f"{rows} ORDER BY timestamp DESC LIMIT ?", (*params, limit))
 
         rows = await cursor.fetchall()
         messages = [self._row_to_message(row) for row in rows]
@@ -819,15 +817,20 @@ class MessageMemory:
         """channel_id -> created_at (aware UTC) of the newest stored message.
 
         One bulk query so boot backfill can resume each channel where the
-        last session stopped instead of re-fetching the whole window."""
+        last session stopped instead of re-fetching the whole window.
+        Lifecycle markers don't count: [YOU CAME ONLINE] is written at boot,
+        before backfill runs, and resuming from it would skip everything
+        said while the bot was down. Their naive (utcnow) stamps also made
+        the comparison with the aware cutoff raise, skipping the channel."""
         cursor = await self._db.execute(
-            "SELECT channel_id, MAX(timestamp) FROM messages GROUP BY channel_id")
+            "SELECT channel_id, MAX(timestamp) FROM messages WHERE is_system = 0 GROUP BY channel_id")
         out = {}
         for cid, ts in await cursor.fetchall():
             try:
-                out[cid] = datetime.fromisoformat(ts)
+                stamp = datetime.fromisoformat(ts)
             except (TypeError, ValueError):
-                pass
+                continue
+            out[cid] = stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
         return out
 
     async def get_backfill_state(self) -> Dict[str, dict]:

@@ -46,14 +46,21 @@ class ConversationState:
         self.session_input_tokens = 0  # usage watermark from response.usage
         self.seed_epoch = 0  # bumped on reseed; guards in-flight usage recording
 
+        # Discord id -> message dict for messages appended in this process.
+        # In memory only: a persisted key would leak into the API payload, and
+        # the races it guards (a seed, then the same message's own append)
+        # happen within a process.
+        self.held: dict = {}
+
         logger.debug(f"ConversationState initialized for channel {channel_id} (max_messages={max_messages})")
 
     def add_message(
         self,
         role: str,
         content: Any,
-        attachment_ids: Optional[List[str]] = None
-    ) -> None:
+        attachment_ids: Optional[List[str]] = None,
+        discord_id: Optional[str] = None,
+    ) -> bool:
         """
         Add message to conversation state.
 
@@ -61,7 +68,24 @@ class ConversationState:
             role: 'user' or 'assistant'
             content: Message content (string or content blocks array)
             attachment_ids: Optional attachment IDs, annotated on the message
+            discord_id: The Discord message this is. A seed can hold a message
+                whose own append comes later; that copy, built from the live
+                message (reply quote, files that were still downloading when
+                the seed read the DB), replaces the held one where it stands
+
+        Returns:
+            False when discord_id was already held (updated, not added), else True
         """
+        held = self.held.get(str(discord_id)) if discord_id is not None else None
+        if held is not None:
+            held["content"] = content
+            if attachment_ids:
+                held["attachment_ids"] = attachment_ids
+            else:
+                held.pop("attachment_ids", None)
+            logger.debug(f"Message {discord_id} is already in state - updated in place")
+            return False
+
         message = {
             "role": role,
             "content": content,
@@ -86,8 +110,11 @@ class ConversationState:
                     )
 
         self.messages.append(message)
+        if discord_id is not None:
+            self.held[str(discord_id)] = message
         self.last_updated = datetime.utcnow()
         logger.debug(f"Added {role} message (total: {len(self.messages)} messages)")
+        return True
 
     def add_tool_use_and_results(
         self,
@@ -142,7 +169,11 @@ class ConversationState:
 
     def enforce_message_cap(self) -> int:
         """
-        Remove oldest Discord messages while over the message cap.
+        Once over the message cap, remove the oldest Discord messages down to
+        a quarter below it. Dropping one per turn shifted every message after
+        the system prompt, so a full channel missed the conversation part of
+        the prompt cache on every turn; the slack keeps the head, and the
+        cached prefix with it, for several turns.
 
         Only Discord messages count toward the cap; tool_use/tool_result
         messages ride along until episodic sessions replace this guard.
@@ -150,29 +181,23 @@ class ConversationState:
         Returns:
             Number of messages removed
         """
-        removed_count = 0
+        def is_discord(msg):
+            return msg.get("message_type", "discord_user").startswith("discord_")
 
-        while True:
-            # Find first Discord message index (more efficient than building full list each iteration)
-            for i, msg in enumerate(self.messages):
-                if msg.get("message_type", "discord_user").startswith("discord_"):
-                    # Found oldest Discord message
-                    removed_message = self.messages.pop(i)
-                    removed_count += 1
-                    self.messages_removed += 1
-                    logger.debug(
-                        f"Removed oldest Discord message due to message cap "
-                        f"(role={removed_message['role']}, message_type={removed_message.get('message_type', 'unknown')})"
-                    )
-                    break
-            else:
-                # No more Discord messages found
-                break
-            if len([
-                msg for msg in self.messages
-                if msg.get("message_type", "discord_user").startswith("discord_")
-            ]) <= self.max_messages:
-                break
+        removed_count = 0
+        count = sum(1 for msg in self.messages if is_discord(msg))
+        if count > self.max_messages:
+            target = self.max_messages - max(1, self.max_messages // 4)
+            while count > target:
+                removed_message = self.messages.pop(
+                    next(i for i, m in enumerate(self.messages) if is_discord(m)))
+                count -= 1
+                removed_count += 1
+                self.messages_removed += 1
+                logger.debug(
+                    f"Removed oldest Discord message due to message cap "
+                    f"(role={removed_message['role']}, message_type={removed_message.get('message_type', 'unknown')})"
+                )
 
         # Only trim leading non-user messages if the cap loop actually removed
         # Discord messages - otherwise this fires unconditionally and strips

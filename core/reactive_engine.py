@@ -42,6 +42,7 @@ from .vaults import VaultEnforcer
 from .conversation_state_manager import ConversationStateManager
 from .internal_constants import (
     TOOL_STUB_KEEP_TURNS, PRIME_CONTEXT_TEMPLATE, format_size, model_max_output,
+    RECENT_MAP_MIN,
 )
 from tools.discord_tools import DiscordToolExecutor, get_discord_tools
 from core.local_attachment_store import LocalAttachmentStore
@@ -49,6 +50,18 @@ from core.local_attachment_store import LocalAttachmentStore
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_LOOP_ITERATIONS = 10
+
+# A turn that may stay quiet says so with SILENT_REPLY. Models reaching for
+# it also write <silence/>, <silent> or </silent>: the whole reply being one
+# such tag is silence; the tag inside other text is just text.
+SILENT_FORMS = re.compile(r"</?\s*silen(?:t|ce)\s*/?\s*>", re.IGNORECASE)
+
+
+def _oldest_first(pending: tuple) -> int:
+    """Sort key for claimed (channel_id, message_id) entries. The queue is in
+    arrival order, and a message with an attachment arrives after its
+    download, behind newer ones; ingestion appends, so it goes by id."""
+    return int(pending[1])
 
 
 def total_input_tokens(usage) -> int:
@@ -382,7 +395,8 @@ class ReactiveEngine:
         channel_id: str,
         conversation_state,
         limit: int = None,
-        exclude_message_ids: Optional[List[int]] = None
+        exclude_message_ids: Optional[List[int]] = None,
+        before_message_id: Optional[int] = None,
     ) -> None:
         """
         Initialize conversation state from database with full attachment data.
@@ -390,18 +404,25 @@ class ReactiveEngine:
         Used by both urgent and periodic paths to ensure consistent state after restart.
         Loads recent messages with attachments, building proper content blocks.
 
-        exclude_message_ids filters messages the caller is about to append
-        itself (on_message stores to the DB before the engine runs, so without
-        the filter the triggering message would land in state twice).
+        on_message stores every message to the DB before the engine runs, so
+        the seed leaves out what will be appended anyway: exclude_message_ids
+        (the caller's own), anything from before_message_id on (ingestion
+        appends those in order) and anything still in the queue. Seeded too,
+        they would land twice, the newer ones ahead of their turn. A message
+        not queued yet (its attachment still downloading) or claimed by a
+        running pass isn't visible here: its append updates the seeded copy.
         """
         if limit is None:
             limit = self.config.api.context_messages
 
         logger.info("Conversation state empty, initializing from recent DB messages")
+        queued = [m for c, m in self.pending_messages if c == str(channel_id)]
         recent_messages = await self.message_memory.get_recent(
             channel_id,
             limit=limit,
-            exclude_message_ids=exclude_message_ids
+            exclude_message_ids=[*(exclude_message_ids or []), *queued],
+            before_message_id=before_message_id,
+            collapse_markers=True,
         )
 
         # Add recent messages to state WITH attachments
@@ -488,7 +509,8 @@ class ReactiveEngine:
             conversation_state.add_message(
                 role,
                 content,
-                attachment_ids=attachment_ids if attachment_ids else None
+                attachment_ids=attachment_ids if attachment_ids else None,
+                discord_id=db_msg.message_id,
             )
 
         # The oldest seeded message can be the bot's own - the API requires a
@@ -784,7 +806,9 @@ class ReactiveEngine:
         if message is not None and getattr(self, "message_memory", None):
             try:
                 recent = await self.message_memory.get_recent(
-                    str(message.channel.id), limit=15)
+                    str(message.channel.id),
+                    limit=max(RECENT_MAP_MIN, self.config.api.context_messages),
+                    real_only=True)
                 client = getattr(self, "discord_client", None)
                 own_id = str(client.user.id) if (client and client.user) else None
                 lines = []
@@ -1390,13 +1414,16 @@ class ReactiveEngine:
 
                 # Send guard (0.13.1): a turn that already posted through
                 # send_message doesn't get a second trailing post. Count what
-                # was dropped; a failed send never sets ended_on_send.
+                # was dropped; a failed send never sets ended_on_send. A lone
+                # <silent/> after a send is the model declining to restate it,
+                # not text to count.
                 if result.ended_on_send and result.response_text.strip():
-                    result.dropped_text_chars += len(result.response_text)
-                    logger.info(
-                        f"Dropping {len(result.response_text)} chars of trailing "
-                        f"text after send_message{log_suffix}"
-                    )
+                    if not SILENT_FORMS.fullmatch(result.response_text.strip()):
+                        result.dropped_text_chars += len(result.response_text)
+                        logger.info(
+                            f"Dropping {len(result.response_text)} chars of trailing "
+                            f"text after send_message{log_suffix}"
+                        )
                     result.response_text = ""
 
                 # Tools ran but the model went quiet: reprompt once for a
@@ -1667,16 +1694,6 @@ class ReactiveEngine:
 
         channel_id = str(message.channel.id)
 
-        # A mention ingests older pending messages for its channel first
-        # (0.13.1): the reply should see what was said before it, oldest-first.
-        for pending_id in self._claim_pending_for_channel(channel_id,
-                                                          exclude={message.id}):
-            try:
-                await self._process_message_to_state(channel_id, pending_id)
-            except Exception as e:
-                logger.error(f"Error ingesting pending message {pending_id} "
-                             f"for mention in {channel_id}: {e}", exc_info=True)
-
         # Load or create conversation state for this channel (v0.5.0)
         conversation_state = None
         if self.conversation_state_manager:
@@ -1684,14 +1701,21 @@ class ReactiveEngine:
                 conversation_state = await self.conversation_state_manager.get_or_create(channel_id)
                 # If state is empty, initialize with recent DB messages.
                 # In-flight mentions (incl. this one) get appended by their
-                # own handlers - seeding them here would duplicate them
+                # own handlers - seeding them here would duplicate them.
+                # The seed leaves out everything from this mention on; the
+                # backlog below appends the older queued messages in order.
                 if len(conversation_state.messages) == 0:
                     await self._initialize_conversation_from_db(
                         channel_id, conversation_state,
-                        exclude_message_ids=list(self._responded_messages)
+                        exclude_message_ids=list(self._responded_messages),
+                        before_message_id=message.id,
                     )
             except Exception as e:
                 logger.error(f"Failed to load conversation state for channel {channel_id}: {e}", exc_info=True)
+
+        # A mention ingests older pending messages for its channel first
+        # (0.13.1): the reply should see what was said before it, oldest-first.
+        await self._ingest_channel_backlog(channel_id, before_message_id=message.id)
 
         # Log incoming message
         self.conversation_logger.log_user_message(
@@ -1726,7 +1750,8 @@ class ReactiveEngine:
                 if conversation_state:
                     try:
                         user_content, attachment_ids = await self._build_user_content(message, processed_attachments)
-                        conversation_state.add_message("user", user_content, attachment_ids)
+                        conversation_state.add_message("user", user_content, attachment_ids,
+                                                       discord_id=message.id)
                         conversation_state.enforce_message_cap()
                     except Exception as e:
                         logger.error(f"Failed to add user message to conversation state: {e}", exc_info=True)
@@ -2155,7 +2180,9 @@ class ReactiveEngine:
                     try:
                         async with self.channel_locks.lock(channel_id):
                             triggers = []
-                            for message_id in message_ids:
+                            # Attachments can queue a message after newer ones;
+                            # ingestion appends, so go oldest-first
+                            for message_id in sorted(message_ids, key=int):
                                 trigger = await self._process_message_to_state(
                                     channel_id, message_id)
                                 if trigger:
@@ -2220,13 +2247,11 @@ class ReactiveEngine:
         try:
             conversation_state = await self.conversation_state_manager.get_or_create(channel_id)
 
-            # If state is empty, initialize with recent DB messages (excluding
-            # the message we are about to append ourselves)
+            # If state is empty, initialize with the DB messages before this
+            # one (it and anything newer get appended by their ingestion)
             if len(conversation_state.messages) == 0:
                 await self._initialize_conversation_from_db(
-                    channel_id, conversation_state,
-                    exclude_message_ids=[message_id]
-                )
+                    channel_id, conversation_state, before_message_id=message_id)
 
             processed_attachments = await self._process_message_attachments(message)
             user_content, attachment_ids = await self._build_user_content(message, processed_attachments)
@@ -2237,9 +2262,12 @@ class ReactiveEngine:
                 logger.debug(f"Skipping contentless message {message_id} (system/sticker-only)")
                 return None
 
-            # Add message to conversation state
-            conversation_state.add_message("user", user_content, attachment_ids)
-            logger.info(f"Added message {message_id} to conversation state (attachments: {len(attachment_ids) if attachment_ids else 0})")
+            # Add message to conversation state (a seed holding it gets this copy)
+            if conversation_state.add_message("user", user_content, attachment_ids,
+                                              discord_id=message_id):
+                logger.info(f"Added message {message_id} to conversation state (attachments: {len(attachment_ids) if attachment_ids else 0})")
+            else:
+                logger.info(f"Message {message_id} was seeded - updated in place")
 
             # Save state immediately (Bug #7 fix for persistence)
             await self.conversation_state_manager.save(conversation_state)
@@ -2435,6 +2463,12 @@ class ReactiveEngine:
                     volatile_tail=volatile_tail, log_suffix=" (periodic)",
                 )
 
+                # Near-miss silence sentinels: the whole reply being
+                # <silent/>, <silence/> or <silent> is silence, not text
+                chose_silence = bool(SILENT_FORMS.fullmatch(result.response_text.strip()))
+                if chose_silence:
+                    result.response_text = ""
+
                 # Reaction-only decision: it acknowledged with an emoji, and
                 # any text it wrote afterwards was discarded by the loop.
                 if result.reaction_used and not result.did_send:
@@ -2619,6 +2653,25 @@ DO NOT explain your reasoning for responding or not responding. DO NOT output me
         self.pending_messages = keep
         return sorted(mine)
 
+    async def _ingest_channel_backlog(self, channel_id: str,
+                                      before_message_id: int) -> None:
+        """Claim and ingest this channel's pending messages older than
+        before_message_id. Call with the channel's lock held."""
+        mine = sorted((p for p in self.pending_messages
+                       if p[0] == channel_id and int(p[1]) < int(before_message_id)),
+                      key=_oldest_first)
+        if not mine:
+            return
+        self.pending_messages = deque(
+            (p for p in self.pending_messages if p not in mine),
+            maxlen=self.pending_messages.maxlen)
+        for cid, message_id in mine:
+            try:
+                await self._process_message_to_state(cid, message_id)
+            except Exception as e:
+                logger.error(f"Error ingesting backlog message {message_id}: {e}",
+                             exc_info=True)
+
     def add_pending_message(self, channel_id: str, message_id: int):
         """
         Add message to pending list for periodic check.
@@ -2663,7 +2716,7 @@ DO NOT explain your reasoning for responding or not responding. DO NOT output me
                 self.pending_messages = keep
 
                 triggers = []
-                for cid, message_id in mine:
+                for cid, message_id in sorted(mine, key=_oldest_first):
                     try:
                         trigger = await self._process_message_to_state(cid, message_id)
                         if trigger:
