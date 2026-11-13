@@ -81,6 +81,13 @@ header.page { padding: 34px 0 0; }
 .gb .gv .up { color: var(--ok); } .gb .gv .tot { color: var(--ink-faint); }
 .gb.spacer { flex: 1; border-left: none; }
 
+/* ---------- app notices (paused/failed updates) ---------- */
+
+.notices:empty { display: none; }
+.notices { margin: -14px 0 22px; display: grid; gap: 6px; }
+.notice { border-left: 3px solid var(--warn); background: var(--warn-bg); color: var(--ink);
+          padding: 9px 14px; font-size: 14px; line-height: 1.4; }
+
 /* ---------- fleet board (dense, color-telegraphed rows) ---------- */
 
 .board-head { display: flex; align-items: baseline; gap: 12px; margin: 4px 0 12px; }
@@ -995,3 +1002,13 @@ footer.page {
   padding: 1px 8px; border-left: 2px solid transparent;
 }
 .rawlog.live .rawline:hover { background: rgba(33,29,22,.03); }
+
+/* ---------- this computer (app settings toggles) ---------- */
+
+.appsettings { margin-top: 34px; border-top: 2px solid var(--ink); padding-top: 12px; }
+.appsettings:empty { display: none; }
+.appsettings h3 { font-family: var(--mono); font-size: 12px; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 10px; }
+.apptoggle { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; cursor: pointer; }
+.apptoggle input { margin-top: 4px; }
+.apptoggle .help { font-size: 14px; color: var(--ink-soft); }
+.apptoggle.off { cursor: default; opacity: .6; }

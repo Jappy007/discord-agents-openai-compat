@@ -52,10 +52,10 @@ Legend: [ ] pending · [~] in progress · [x] done
 
 ## Phase 6 — App and dashboard polish
 
-- [ ] 6.1 Requirements hash install
-- [ ] 6.2 Paused/failed updates state
-- [ ] 6.3 Keep awake / open at login
-- [ ] 6.4 Fleet board real status
+- [x] 6.1 Requirements hash install
+- [x] 6.2 Paused/failed updates state
+- [x] 6.3 Keep awake / open at login
+- [x] 6.4 Fleet board real status
 
 ## Phase 7 — Skills
 

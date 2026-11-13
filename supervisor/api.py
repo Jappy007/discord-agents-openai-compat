@@ -186,6 +186,7 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
             "tokens_today": tokens,
             "cost_today_usd": round(cost, 4),
             "cost_complete": cost_complete,
+            "app": data.app_state(),   # the desktop app's update report (fleet notices)
             "time": datetime.now(timezone.utc).isoformat(),
         })
 

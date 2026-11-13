@@ -59,6 +59,9 @@ class SupervisorRoot:
     def supervisor_state(self) -> Path:
         return self.persistence_dir() / "supervisor_state.json"
 
+    def app_state(self) -> Path:
+        return self.persistence_dir() / "app_state.json"
+
     def api_token_file(self) -> Path:
         return self.persistence_dir() / "supervisor_token"
 

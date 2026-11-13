@@ -6,13 +6,15 @@
 // current from GitHub Releases, and updater.js fast-forwards the framework
 // checkout to the latest release before the daemon starts on the new code.
 
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { spawn } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const http = require("http");
-const { updateFrameworkRepo } = require("./updater");
+const { updateFrameworkRepo, ensureDeps } = require("./updater");
+const { AppSettings } = require("./settings");
 
 const PORT = process.env.SLH_SUPERVISOR_PORT || 8642;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -92,6 +94,20 @@ function fetchDaemonToken() {
   });
 }
 
+// What the app tells the daemon, as a file in the data root it reads (the
+// dashboard shows it): the last framework update and dependency install,
+// and a restart the app is waiting on.
+function appStatePath(cfg) { return path.join(cfg.root, "persistence", "app_state.json"); }
+function readAppState(cfg) {
+  try { return JSON.parse(fs.readFileSync(appStatePath(cfg), "utf-8")); } catch (e) { return {}; }
+}
+function writeAppState(cfg, state) {
+  try {
+    fs.mkdirSync(path.dirname(appStatePath(cfg)), { recursive: true });
+    fs.writeFileSync(appStatePath(cfg), JSON.stringify(state, null, 1));
+  } catch (e) { log(`couldn't write app state: ${e.message}`); }
+}
+
 async function ensureDaemon() {
   if (await daemonUp()) return true; // operator already runs one - attach, leave it be
   const cfg = readConfig();
@@ -104,18 +120,28 @@ async function ensureDaemon() {
       "Point app-config.json's \"root\" at your Discord Agents install.");
     return false;
   }
-  // Catch the framework up to the latest release before it boots. Skipped on
-  // dev branches, dirty trees, non-git installs, and bundled installs.
+  // Catch the framework up to the latest release before it boots, then make
+  // its dependencies match. Skipped on dev branches, dirty trees, non-git
+  // installs, and bundled installs (the installer carries both).
+  const state = readAppState(cfg);
+  // a pending restart is over once the machine has booted since it was asked for
+  if (state.restart_pending && state.restart_pending.at < Date.now() - os.uptime() * 1000) {
+    delete state.restart_pending;
+  }
   if (cfg.autoUpdateFramework !== false && !cfg.bundled) {
-    const r = updateFrameworkRepo({
-      root: cfg.root,
-      python: cfg.python || "python",
-      branch: cfg.frameworkBranch || "main",
-      log,
-    });
+    const python = cfg.python || "python";
+    const r = updateFrameworkRepo({ root: cfg.root, branch: cfg.frameworkBranch || "main", log });
     log(`framework update: ${r.status}${r.reason ? ` (${r.reason})` : ""}` +
         (r.status === "updated" ? ` ${r.from.slice(0, 7)}→${r.to.slice(0, 7)}` : ""));
+    const deps = ensureDeps({
+      root: cfg.root, python, log,
+      stamp: path.join(cfg.root, "persistence", "requirements.sha256"),
+    });
+    log(`dependencies: ${deps.status}${deps.reason ? ` (${deps.reason})` : ""}`);
+    state.framework = { ...r, at: new Date().toISOString() };
+    state.deps = deps;
   }
+  writeAppState(cfg, state);
   fs.mkdirSync(cfg.root, { recursive: true }); // data root (the daemon seeds inside it)
   const args = [script, "--root", cfg.root];
   if (cfg.codeRoot) args.push("--code-root", cfg.codeRoot);
@@ -177,7 +203,12 @@ function setupShellAutoUpdate(win) {
   autoUpdater.on("update-available", (info) => log(`launcher update available: ${info.version}`));
   autoUpdater.on("update-not-available", () => log("launcher up to date"));
   autoUpdater.on("error", (err) => log(`launcher update error: ${err == null ? "unknown" : err.message || err}`));
+  // One dialog at a time (the 6-hourly re-check announces the same download
+  // again), and none once a restart is under way
+  let offering = false;
   autoUpdater.on("update-downloaded", async (info) => {
+    if (offering) return;
+    offering = true;
     const { response } = await dialog.showMessageBox(win, {
       type: "info",
       buttons: ["Restart now", "Later"],
@@ -187,7 +218,7 @@ function setupShellAutoUpdate(win) {
       message: `Version ${info.version} is ready.`,
       detail: "Restart to finish updating. Your bots, config, and memories are untouched.",
     });
-    if (response !== 0) return;
+    if (response !== 0) { offering = false; return; }
     // quitAndInstall quits through app.quit(), which skips window-all-closed:
     // stop the bots first, or the daemon dies with the app and they run on
     // with nothing managing them. Hidden meanwhile, so nothing starts a bot.
@@ -202,7 +233,22 @@ function setupShellAutoUpdate(win) {
   }, UPDATE_INTERVAL_MS);
 }
 
+// The dashboard's toggles for the app's own settings (0.15.0), through the
+// preload bridge. Only pages from our daemon may ask.
+function serveSettings() {
+  const settings = new AppSettings({
+    file: path.join(app.getPath("userData"), "app-settings.json"), app, powerSaveBlocker, log });
+  settings.apply();
+  const ours = (event) => (event.senderFrame?.url || "").startsWith(`${BASE}/`);
+  ipcMain.handle("da-settings:get", (event) => (ours(event) ? settings.view() : null));
+  ipcMain.handle("da-settings:set", (event, key, value) => {
+    if (!ours(event)) throw new Error("not from the dashboard");
+    return settings.set(key, value);
+  });
+}
+
 async function createWindow() {
+  serveSettings();
   const win = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -211,6 +257,7 @@ async function createWindow() {
     autoHideMenuBar: true,
     title: "Discord Agents",
     icon: path.join(__dirname, "build", "icon.png"),
+    webPreferences: { preload: path.join(__dirname, "preload.js") },
   });
   setupShellAutoUpdate(win);
   if (await ensureDaemon()) {

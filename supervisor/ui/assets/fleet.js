@@ -103,6 +103,7 @@ function renderGlobalBar() {
   const running = bots.filter((b) => b.running).length;
   const t = supervisor.tokens_today;
   const down = !supervisor.online;
+  document.getElementById("notices").innerHTML = noticesHTML(supervisor.app);
   document.getElementById("globalbar").innerHTML = `
     <div class="gb supervisor ${down ? "down" : ""}">
       <span class="gk">Supervisor</span>
@@ -138,22 +139,49 @@ function renderGlobalBar() {
 
 function renderAll() { renderBoard(); renderGlobalBar(); }
 
+/* ---------- notices (app update / dependency report) ---------- */
+
+// What the desktop app reported about its own update and dependencies
+// (app/main.js writes persistence/app_state.json; the daemon serves it on
+// /api/supervisor), plus a pending restart.
+function noticesHTML(app) {
+  if (!app) return "";
+  const out = [];
+  if (app.restart_pending)
+    out.push("Restart to finish an app change: a settings or update step is waiting.");
+  const fw = app.framework || {};
+  if (fw.status === "skipped" && fw.files)
+    out.push(`Updates are paused: ${fw.files.map(esc).join(", ")} ${fw.files.length === 1 ? "was" : "were"} ` +
+             `changed locally. Undo or commit the change to resume updates.`);
+  else if (fw.status === "skipped" && /diverged/.test(fw.reason || ""))
+    out.push("Updates are paused: this install's history diverged from the release branch.");
+  else if (fw.status === "error")
+    out.push(`The last update check failed: ${esc(fw.reason || "unknown error")}.`);
+  if (app.deps && app.deps.status === "error")
+    out.push(`Installing dependencies failed (${esc(app.deps.reason || "unknown error")}). ` +
+             `The app tries again on its next launch.`);
+  return out.map((text) => `<div class="notice">${text}</div>`).join("");
+}
+
 /* ---------- actions ---------- */
 
 const findBot = (id) => bots.find((b) => b.bot_id === id);
+
+async function refreshBots() {
+  bots = await apiGet("/api/bots");
+  renderAll();
+}
 
 async function act(id, action) {
   const bot = findBot(id);
   bot.pending = action;
   renderAll();
-  await apiSend("POST", `/api/bots/${id}/${action}`);
+  try { await apiSend("POST", `/api/bots/${id}/${action}`); }
+  catch (ex) { /* the re-pull below shows what actually happened */ }
   delete bot.pending;
-  if (action === "stop") Object.assign(bot, { running: false, pid: null, uptime_s: 0 });
-  else Object.assign(bot, {
-    running: true, pid: 20000 + Math.floor(Math.random() * 9999),
-    uptime_s: 5, last_activity: new Date().toISOString(),
-  });
-  renderAll();
+  await refreshBots();
+  // a start can take a few seconds to show its real PID / state
+  if (action !== "stop") [3000, 8000].forEach((ms) => setTimeout(refreshBots, ms));
 }
 
 async function deleteBot(id) {
@@ -191,6 +219,40 @@ function createBot() {
   };
 }
 
+/* ---------- this computer (0.15.0): the app's own settings ---------- */
+/* Only inside the desktop app: its preload exposes window.discordAgentsApp. */
+
+const APP_TOGGLES = [
+  ["keepAwake", "Keep this computer awake while Discord Agents is open",
+   "Bots can't answer from a sleeping PC. The screen may still turn off."],
+  ["startAtLogin", "Open Discord Agents when you sign in",
+   "Your bots come back on their own after a restart."],
+];
+
+async function renderAppSettings() {
+  const bridge = window.discordAgentsApp;
+  const el = document.getElementById("app-settings");
+  if (!bridge || !el) return;
+  const s = await bridge.getSettings();
+  if (!s) return;
+  el.innerHTML = `<h3>This computer</h3>` + APP_TOGGLES.map(([key, label, help]) => {
+    const off = key === "startAtLogin" && !s.loginSupported;
+    return `<label class="apptoggle ${off ? "off" : ""}">
+      <input type="checkbox" data-key="${key}" ${s[key] ? "checked" : ""} ${off ? "disabled" : ""}>
+      <span><b>${esc(label)}</b><br><span class="help">${esc(off ? "Works in the installed app." : help)}</span></span>
+    </label>`;
+  }).join("") + `<div class="field-error" id="app-settings-err"></div>`;
+  el.querySelectorAll("input[data-key]").forEach((box) => box.addEventListener("change", async () => {
+    try {
+      await bridge.setSetting(box.dataset.key, box.checked);
+      document.getElementById("app-settings-err").textContent = "";
+    } catch (e) {
+      box.checked = !box.checked;
+      document.getElementById("app-settings-err").textContent = `Couldn't change that: ${e.message}`;
+    }
+  }));
+}
+
 /* ---------- wiring ---------- */
 
 document.getElementById("board").addEventListener("click", (e) => {
@@ -225,5 +287,6 @@ document.getElementById("add-bot").addEventListener("click", (e) => {
   document.getElementById("foot-version").textContent =
     `supervisor v${supervisor.version}`;
   renderAll();
+  renderAppSettings();
   setInterval(renderGlobalBar, 30_000);
 })();

@@ -73,6 +73,10 @@ class BotData:
         with open(path, encoding="utf-8-sig") as f:
             return yaml.safe_load(f) or {}
 
+    def app_state(self) -> dict:
+        """The desktop app's last framework-update / dependency report."""
+        return _read_json(self.root.app_state(), {})
+
     # --- names ------------------------------------------------------------
 
     def _names(self, bot_id: str) -> dict:
