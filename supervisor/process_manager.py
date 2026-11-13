@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 CRASH_RETRY_CAP_PER_HOUR = 5
 BACKOFF_BASE_SECONDS = 60  # 1, 2, 4, 8, 16 minutes
+STOP_TIMEOUT_SECONDS = 15  # clean-stop window before killing a bot
 
 
 def _spawns(command_line: str, script: Path, bot_id: str) -> bool:
@@ -105,9 +106,11 @@ class ProcessManager:
         # Absolute script path: with a code_root/data_root split the script
         # lives in the install while cwd stays the data root. In the git
         # model both are the same directory - identical to the old behavior.
+        # The bot's stdin is ours: closing it stops the bot (see stop).
         return await asyncio.create_subprocess_exec(
             sys.executable, str(self.root.bot_manager_script()), "spawn", bot_id,
-            cwd=str(self.root.root),
+            "--supervised",
+            cwd=str(self.root.root), stdin=asyncio.subprocess.PIPE,
         )
 
     def _owned_pids(self) -> List[int]:
@@ -183,11 +186,19 @@ class ProcessManager:
             self._save_desired()
         proc = self._procs.get(bot_id)
         if proc is not None and proc.returncode is None:
-            proc.terminate()
+            # The bot shuts down when its stdin closes: offline markers, its
+            # running flag cleared, engines stopped. terminate() (SIGTERM) is
+            # a hard kill on Windows, so it is only the fallback.
             try:
-                await asyncio.wait_for(proc.wait(), timeout=15)
+                if getattr(proc, "stdin", None) is not None:
+                    proc.stdin.close()
+                    await asyncio.wait_for(proc.wait(), timeout=STOP_TIMEOUT_SECONDS)
+                else:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
-                logger.warning(f"{bot_id} ignored SIGTERM - killing")
+                logger.warning(f"{bot_id} didn't stop within "
+                               f"{STOP_TIMEOUT_SECONDS} s - killing")
                 proc.kill()
                 await proc.wait()
         self._procs.pop(bot_id, None)
@@ -258,10 +269,29 @@ class ProcessManager:
             await asyncio.sleep(interval)
 
     async def shutdown(self) -> None:
-        """Stop every managed process WITHOUT clearing desired state - the
-        bots come back when the supervisor does."""
+        """Stop every managed process WITHOUT touching desired state - the
+        bots come back when the supervisor does. Closing stdin gives each
+        bot the clean-stop window concurrently, so shutdown is bounded by
+        one STOP_TIMEOUT_SECONDS, not one per bot."""
         desired_snapshot = list(self._desired)
-        for bot_id in list(self._procs):
-            await self.stop(bot_id)
+        await asyncio.gather(*(self._end(bot_id) for bot_id in list(self._procs)))
         self._desired = desired_snapshot
         self._save_desired()
+
+    async def _end(self, bot_id: str) -> None:
+        """Stop one managed process without changing desired state."""
+        proc = self._procs.get(bot_id)
+        if proc is not None and proc.returncode is None:
+            try:
+                if getattr(proc, "stdin", None) is not None:
+                    proc.stdin.close()
+                    await asyncio.wait_for(proc.wait(), timeout=STOP_TIMEOUT_SECONDS)
+                else:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning(f"{bot_id} didn't stop within "
+                               f"{STOP_TIMEOUT_SECONDS} s - killing")
+                proc.kill()
+                await proc.wait()
+        self._procs.pop(bot_id, None)

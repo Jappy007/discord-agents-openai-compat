@@ -42,13 +42,13 @@ Legend: [ ] pending · [~] in progress · [x] done
 
 ## Phase 5 — Lifecycle, reconnect, clean stop
 
-- [ ] 5.1 Boot once per process
-- [ ] 5.2 Presence survives re-identify
-- [ ] 5.3 Resume floor / reconnect catch-up
-- [ ] 5.4 Boot failure
-- [ ] 5.5 Channel names on reconnect
-- [ ] 5.6 Clean stop
-- [ ] 5.7 App restart
+- [x] 5.1 Boot once per process
+- [x] 5.2 Presence survives re-identify
+- [x] 5.3 Resume floor / reconnect catch-up
+- [x] 5.4 Boot failure
+- [x] 5.5 Channel names on reconnect
+- [x] 5.6 Clean stop
+- [x] 5.7 App restart
 
 ## Phase 6 — App and dashboard polish
 

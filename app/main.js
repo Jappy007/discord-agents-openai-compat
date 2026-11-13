@@ -146,9 +146,9 @@ async function requestShutdown() {
   });
 }
 
-async function shutdownDaemon() {
+async function shutdownDaemon(reason = "window closed") {
   if (!daemon) return; // attached to an operator-run daemon - leave it be
-  log("window closed - asking the daemon to stop its bots and exit");
+  log(`${reason} - asking the daemon to stop its bots and exit`);
   const accepted = await requestShutdown();
   if (accepted) {
     for (let i = 0; i < 30; i++) {           // up to 15s for clean bot stops
@@ -187,7 +187,13 @@ function setupShellAutoUpdate(win) {
       message: `Version ${info.version} is ready.`,
       detail: "Restart to finish updating. Your bots, config, and memories are untouched.",
     });
-    if (response === 0) autoUpdater.quitAndInstall();
+    if (response !== 0) return;
+    // quitAndInstall quits through app.quit(), which skips window-all-closed:
+    // stop the bots first, or the daemon dies with the app and they run on
+    // with nothing managing them. Hidden meanwhile, so nothing starts a bot.
+    win.hide();
+    await shutdownDaemon("installing a launcher update");
+    autoUpdater.quitAndInstall();
   });
 
   autoUpdater.checkForUpdates().catch((e) => log(`launcher update check failed: ${e.message}`));
