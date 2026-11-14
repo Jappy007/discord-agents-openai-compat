@@ -11,6 +11,8 @@ stand-in with that shape that talks to any OpenAI-compatible
 tool-calling loop is translated; vision is supported, and structured JSON is
 mapped to `response_format`. See OPENAI_COMPATIBILITY.md.
 """
-from core.llm_providers.factory import build_llm_client, utility_model
+from core.llm_providers.factory import (
+    background_model, build_llm_client, utility_model, worker_model,
+)
 
-__all__ = ["build_llm_client", "utility_model"]
+__all__ = ["build_llm_client", "utility_model", "background_model", "worker_model"]

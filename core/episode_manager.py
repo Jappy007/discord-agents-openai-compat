@@ -229,12 +229,14 @@ class EpisodeManager:
         conversation_state_manager,
         llm_client,
         default_model=None,
+        background_model_name=None,
     ):
         self.message_memory = message_memory
         self.memory_manager = memory_manager
         self.conversation_state_manager = conversation_state_manager
         self.llm = llm_client
         self.default_model = default_model
+        self.background_model_name = background_model_name
         self._locks: dict = {}
         # Shared per-channel turn locks, attached by ReactiveEngine so an
         # episode reseed can't land between a turn's tool pairs and its reply.
@@ -393,7 +395,7 @@ class EpisodeManager:
 Distill this episode and return the updated channel state per the schema."""
 
         response = await self.llm.beta.messages.create(
-            model=utility_model(self.default_model),
+            model=self.background_model_name or utility_model(self.default_model),
             max_tokens=EPISODE_DISTILL_MAX_TOKENS,
             system=DISTILL_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],

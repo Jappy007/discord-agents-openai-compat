@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 from .proactive_action import ProactiveAction
 from .engagement_tracker import EngagementTracker
 from .vaults import VaultEnforcer
-from .llm_providers.factory import utility_model
+from .llm_providers.factory import background_model
 from .internal_constants import (
     FOLLOWUP_STANDALONE_IDLE_MINUTES,
     PROACTIVE_INCLUDES_THREADS,
@@ -997,7 +997,7 @@ Channel idle time: {await self.get_channel_idle_time(action.channel_id):.1f} hou
                 )
                 try:
                     response = await self.llm.messages.create(
-                        model=utility_model(self.config.api.model),
+                        model=background_model(self.config.api),
                         max_tokens=WATCH_EVAL_MAX_TOKENS,
                         system=WATCH_EVAL_PROMPT.format(question=watch["question"]),
                         messages=[{"role": "user", "content": transcript}],

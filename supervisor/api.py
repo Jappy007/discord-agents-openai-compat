@@ -175,6 +175,8 @@ def build_app(root: SupervisorRoot, pm: ProcessManager,
                     cost_complete = False
             else:
                 cost += s["cost_today_usd"]
+                if s.get("cost_complete") is False:
+                    cost_complete = False
         return json_response({
             "online": True,
             "status": "running",

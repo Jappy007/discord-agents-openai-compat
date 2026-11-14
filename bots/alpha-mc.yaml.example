@@ -58,6 +58,9 @@ reactive:
 # ============================================================
 api:
   model: ""  # falls back to OPENAI_MODEL
+  # Optional cheaper models for internal work and delegated helpers.
+  # background_model: "gpt-4o-mini"
+  # worker_model: "gpt-4.1-mini"
   max_tokens: 4096
   context_messages: 30
   context_tokens: 80000

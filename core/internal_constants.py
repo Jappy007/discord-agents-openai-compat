@@ -39,10 +39,58 @@ FOLLOWUP_STANDALONE_IDLE_MINUTES = 10
 # is a conservative default; OPENAI_MAX_OUTPUT_TOKENS can cap it further.
 MODEL_MAX_OUTPUT_DEFAULT = 16000
 
+# A small, best-effort catalog for common OpenAI models (USD per million
+# tokens). Unknown or self-hosted models simply get no price and the default
+# output ceiling - the endpoint's own limits still apply. `output` is the
+# model's max output tokens; `cache_read`/`cache_write` default to `input`.
+MODEL_CATALOG = {
+    "gpt-4o":         {"output": 16_384, "input": 2.50, "cache_read": 1.25, "output_price": 10.00},
+    "gpt-4o-mini":    {"output": 16_384, "input": 0.15, "cache_read": 0.075, "output_price": 0.60},
+    "gpt-4.1":        {"output": 32_768, "input": 2.00, "cache_read": 0.50, "output_price": 8.00},
+    "gpt-4.1-mini":   {"output": 32_768, "input": 0.40, "cache_read": 0.10, "output_price": 1.60},
+    "gpt-4.1-nano":   {"output": 32_768, "input": 0.10, "cache_read": 0.025, "output_price": 0.40},
+    "o3-mini":        {"output": 100_000, "input": 1.10, "cache_read": 0.55, "output_price": 4.40},
+    "o4-mini":        {"output": 100_000, "input": 1.10, "cache_read": 0.275, "output_price": 4.40},
+}
+
+
+def _catalog_entry(model: str):
+    """The catalog row for a model, matching exact names and dated variants
+    (`gpt-4o-mini-2024-07-18`); the longest prefix wins."""
+    name = (model or "").strip().lower()
+    if name in MODEL_CATALOG:
+        return MODEL_CATALOG[name]
+    for key in sorted(MODEL_CATALOG, key=len, reverse=True):
+        if name.startswith(key + "-") or name.startswith(key + ":"):
+            return MODEL_CATALOG[key]
+    return None
+
 
 def model_max_output(model: str) -> int:
-    """The output-token ceiling for a model."""
-    return MODEL_MAX_OUTPUT_DEFAULT
+    """The output-token ceiling for a model (catalog when known)."""
+    entry = _catalog_entry(model)
+    return entry["output"] if entry else MODEL_MAX_OUTPUT_DEFAULT
+
+
+def model_price(model: str) -> dict:
+    """Per-million-token prices for a model, or {} when it isn't catalogued."""
+    return dict(_catalog_entry(model) or {})
+
+
+def estimate_cost_usd(model: str, tokens: dict) -> float | None:
+    """A turn's cost from its token counts, or None when the model has no
+    catalog price. Cache-write tokens are priced as fresh input."""
+    price = model_price(model)
+    if not price or not tokens:
+        return None
+    inp = price.get("input", 0.0)
+    read = price.get("cache_read", inp)
+    write = price.get("cache_write", inp)
+    cost = (tokens.get("uncached_in", 0) or 0) * inp
+    cost += (tokens.get("cache_read", 0) or 0) * read
+    cost += (tokens.get("cache_write", 0) or 0) * write
+    cost += (tokens.get("out", 0) or 0) * price.get("output_price", 0.0)
+    return cost / 1_000_000
 
 
 # =============================================================================

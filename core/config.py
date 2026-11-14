@@ -100,6 +100,11 @@ class WebSearchConfig:
 class APIConfig:
     """LLM API configuration"""
     model: str = ""  # falls back to OPENAI_MODEL when empty
+    # Background work (episode distillation, watch checks): None falls back to
+    # OPENAI_UTILITY_MODEL, then the main model.
+    background_model: Optional[str] = None
+    # Delegated workshop workers: None uses the main model.
+    worker_model: Optional[str] = None
     max_tokens: int = 4096
     context_messages: int = 30  # Messages to remember (rolling window)
     context_tokens: int = 80000  # Session token threshold: episodize + reseed past this (from response.usage)
@@ -410,6 +415,8 @@ class BotConfig:
 
         api = APIConfig(
             model=api_data.get("model", ""),
+            background_model=api_data.get("background_model"),
+            worker_model=api_data.get("worker_model"),
             max_tokens=api_data.get("max_tokens", 4096),
             context_messages=context_messages,
             context_tokens=context_tokens,

@@ -19,6 +19,8 @@ from typing import Callable, List, Optional
 import yaml
 
 
+from core.internal_constants import estimate_cost_usd
+
 from .paths import SupervisorRoot
 
 logger = logging.getLogger(__name__)
@@ -350,10 +352,19 @@ class BotData:
         events_today = _query(
             db, "SELECT kind, ts, payload FROM events WHERE ts >= ?", (_today_iso(),))
         tokens = {"uncached_in": 0, "cache_read": 0, "cache_write": 0, "out": 0}
+        default_model = (config.get("api") or {}).get("model") or ""
+        cost, cost_complete = 0.0, True
         for row in events_today:
-            t = (json.loads(row["payload"]) or {}).get("tokens") or {}
+            payload = json.loads(row["payload"]) or {}
+            t = payload.get("tokens") or {}
             for k in tokens:
                 tokens[k] += t.get(k, 0) or 0
+            if any(t.values()):
+                estimate = estimate_cost_usd(payload.get("model") or default_model, t)
+                if estimate is None:
+                    cost_complete = False
+                else:
+                    cost += estimate
 
         def last_event(kinds, columns="ts"):
             rows = _query(
@@ -423,7 +434,8 @@ class BotData:
             },
             "context": context,
             "tokens_today": tokens,
-            "cost_today_usd": None,  # pricing is endpoint/model-specific
+            "cost_today_usd": round(cost, 4) if (cost or cost_complete) else None,
+            "cost_complete": cost_complete,   # False when a model had no catalog price
             "dms": {"open": len(dms), "active_today": dm_active_today},
             "followups": self._followups_pending(bot_id, names),
             "watches": self._active_watches(bot_id, names),

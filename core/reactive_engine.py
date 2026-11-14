@@ -173,6 +173,7 @@ def _accumulate_usage(total, usage):
 class ToolLoopResult:
     """Outcome of one full tool-use loop (one bot turn)."""
     response_text: str = ""
+    model: str = ""  # the model this turn ran on (pricing, dashboards)
     tools_were_used: bool = False
     usage: Any = None  # usage of the final response in the loop
     total_usage: Any = None  # sum of every model call in this turn (0.13.1)
@@ -385,6 +386,7 @@ class ReactiveEngine:
                 conversation_state_manager=self.conversation_state_manager,
                 llm_client=self.llm,
                 default_model=self.config.api.model,
+                background_model_name=self.config.api.background_model,
             )
             self.episode_manager.channel_locks = self.channel_locks
 
@@ -440,7 +442,7 @@ class ReactiveEngine:
                 transcripts=Path("persistence") / "workshop" / self.config.bot_id / "workers",
                 discord_tools=lambda: self.discord_tool_executor,
                 attachments=lambda: self.attachment_manager,
-                llm=self.llm, model=self.config.api.model)
+                llm=self.llm)
             checkins = CheckIns(self.projects, self.workshop,
                                 ContextNoteWriter(self.conversation_state_manager, self.channel_locks),
                                 self.job_watcher.request_turn, self.config, self.proactive_limits,
@@ -1270,6 +1272,7 @@ class ReactiveEngine:
             # send_message rather than the final text path (0.14.0).
             "response": (result.response_text
                          or ("\n".join(result.sent_texts) if result.sent_texts else None)),
+            "model": result.model or None,
             "tokens": {
                 "uncached_in": getattr(usage, "input_tokens", 0) or 0,
                 "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
@@ -1606,6 +1609,7 @@ class ReactiveEngine:
         conversation prefix. It is never persisted.
         """
         result = ToolLoopResult()
+        result.model = api_params.get("model") or ""
         loop_iteration = 0
         started = time.monotonic()
         workshop_turn = any(

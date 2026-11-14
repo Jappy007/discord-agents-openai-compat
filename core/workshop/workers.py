@@ -36,6 +36,7 @@ from core.internal_constants import (
     WORKSHOP_BACKGROUND_PER_SCOPE,
     model_max_output,
 )
+from core.llm_providers.factory import worker_model
 from core.workshop.backend import SandboxUnavailable
 from core.workshop.jobs import DONE, FAILED, new_job_id
 from core.workshop.scopes import Scope
@@ -133,7 +134,7 @@ class Workers:
         self.discord_tools = discord_tools      # late-bound: built in on_ready
         self.attachments = attachments
         self.llm = llm
-        self.model = model or config.api.model
+        self.model = model or worker_model(config.api)
         self._tasks = set()
         self.clock = time.monotonic
 

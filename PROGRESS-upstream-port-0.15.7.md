@@ -108,7 +108,18 @@ Legend: [ ] pending · [~] in progress · [x] done
 
 ## Phase 9 — Model roles and optional OpenAI layer
 
-- [ ] 9.1 Per-bot background/worker models
-- [ ] 9.2 Mini-catalog / costs
-- [ ] 9.3 Cost-by-turn script
-- [ ] 9.4 Responses adapter (optional)
+- [x] 9.1 Per-bot background/worker models (`api.background_model`,
+      `api.worker_model`; `OPENAI_UTILITY_MODEL` remains the global fallback)
+- [x] 9.2 Mini-catalog / costs (`MODEL_CATALOG`, ceilings and per-model prices;
+      `cost_today_usd` + `cost_complete` in the supervisor)
+- [x] 9.3 Cost-by-turn script (`scripts/cost_by_turn_kind.py`, per bot/kind/model)
+- [ ] 9.4 Responses adapter — deferred (optional); generic OpenAI-compatible
+      `/chat/completions` remains the only transport
+- [x] 9.5 Regression tests (`tests/test_model_roles_phase9.py`)
+
+> Fork adaptations: upstream routes roles through `core/model/`; this fork
+> resolves them in `core/llm_providers/factory.py` and keeps passing explicit
+> model names to the existing OpenAI-compatible client. Unknown/self-hosted
+> models stay unpriced (cost totals are marked partial) and keep the generic
+> output ceiling. The cost script reads the fork's
+> `persistence/<bot>_messages.db` layout.

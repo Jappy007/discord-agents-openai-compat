@@ -96,6 +96,11 @@ api:
   # Model name for your OpenAI-compatible endpoint. Leave empty to use
   # OPENAI_MODEL from .env.
   model: ""
+  # Optional cheaper models for internal work and delegated helpers. Leave
+  # unset to use the main model (background work also honours
+  # OPENAI_UTILITY_MODEL from .env).
+  # background_model: "gpt-4o-mini"   # episode distillation, watch checks
+  # worker_model: "gpt-4.1-mini"       # workshop helpers (delegate)
   max_tokens: 16000
 
   # Context management
