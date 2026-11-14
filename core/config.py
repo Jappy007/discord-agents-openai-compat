@@ -9,10 +9,11 @@ See internal_constants.py for hardcoded implementation details.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 from functools import lru_cache
 import yaml
 import os
+import re
 import logging
 
 from core.internal_constants import (
@@ -133,6 +134,30 @@ class AttachmentsConfig:
     repository: RepositoryConfig = field(default_factory=RepositoryConfig)
 
 
+# "host" arrives with Host mode (0.14.2)
+WORKSHOP_SETTINGS = ("container", "off")
+# A bot whose workshop can't start exits with this (core/workshop/gate.py);
+# the supervisor holds it as blocked instead of crash-restarting. Here because
+# core.config is the one module the supervisor shares with the bot.
+START_BLOCKED_EXIT_CODE = 78   # EX_CONFIG
+_DISCORD_ID = re.compile(r"^\d{5,25}$")
+_HOSTNAME = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+
+@dataclass
+class WorkshopConfig:
+    """The workshop (0.14): a sandbox per scope (server, vaulted channel or
+    thread, DM) with a shell, an editor and filtered egress."""
+    enabled: bool = True
+    default_setting: str = "container"
+    # id -> container | off, for a server, channel, thread or DM user; the
+    # most specific configured id wins (core/workshop/scopes.setting_for)
+    scopes: Dict[str, str] = field(default_factory=dict)
+    operators: List[str] = field(default_factory=list)      # user ids; default: the app owner
+    allowlist: List[str] = field(default_factory=list)      # hosts added to every scope's preset
+    open_internet: List[str] = field(default_factory=list)  # scope ids allowed any public host (443 only)
+
+
 @dataclass
 class SkillsConfig:
     """Skills are local folders under skills/, always available (0.14).
@@ -218,6 +243,7 @@ class BotConfig:
     vaults: List[str] = field(default_factory=list)  # channel/server IDs whose content never leaves them
     attachments: AttachmentsConfig = field(default_factory=AttachmentsConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
+    workshop: WorkshopConfig = field(default_factory=WorkshopConfig)
 
     @classmethod
     def load(cls, yaml_path: Path) -> 'BotConfig':
@@ -426,6 +452,22 @@ class BotConfig:
             default_skills=list(skills_data.get("default_skills") or []),
         )
 
+        def setting(value) -> str:
+            # YAML 1.1 reads a bare `off` (or `on`) as a boolean
+            if isinstance(value, bool):
+                return "container" if value else "off"
+            return str(value).lower()
+
+        workshop_data = data.get("workshop") or {}
+        workshop = WorkshopConfig(
+            enabled=bool(workshop_data.get("enabled", True)),
+            default_setting=setting(workshop_data.get("default_setting", "container")),
+            scopes={str(k): setting(v) for k, v in (workshop_data.get("scopes") or {}).items()},
+            operators=[str(v) for v in (workshop_data.get("operators") or [])],
+            allowlist=[str(h).lower().rstrip(".") for h in (workshop_data.get("allowlist") or [])],
+            open_internet=[str(v) for v in (workshop_data.get("open_internet") or [])],
+        )
+
         # Parse minecraft config
         minecraft_data = data.get("minecraft", {})
         minecraft = MinecraftConfig(
@@ -458,6 +500,7 @@ class BotConfig:
             vaults=[str(v) for v in (data.get("vaults") or [])],
             attachments=attachments,
             skills=skills,
+            workshop=workshop,
         )
 
     def validate(self) -> List[str]:
@@ -527,6 +570,8 @@ class BotConfig:
         if not isinstance(self.vaults, list) or any(not str(v).strip() for v in self.vaults):
             errors.append("vaults must be a list of channel/server IDs")
 
+        errors.extend(self._validate_workshop())
+
         # Validate logging level
         valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
         if self.logging.level not in valid_levels:
@@ -541,6 +586,36 @@ class BotConfig:
                     f"got '{self.personality.reaction_usage}'"
                 )
 
+        return errors
+
+    def _validate_workshop(self) -> List[str]:
+        """Shape checks only. Whether this host can actually run a sandbox is
+        the bot's start gate, not config validation."""
+        w = self.workshop
+        errors = []
+
+        def setting_error(where: str, value: str):
+            if value == "host":
+                return f"{where}: host mode isn't available in this release (use container or off)"
+            if value not in WORKSHOP_SETTINGS:
+                return f"{where} must be one of {list(WORKSHOP_SETTINGS)}, got '{value}'"
+            return None
+
+        if (e := setting_error("workshop.default_setting", w.default_setting)):
+            errors.append(e)
+        for scope_id, value in w.scopes.items():
+            if not _DISCORD_ID.match(scope_id):
+                errors.append(f"workshop.scopes: '{scope_id}' is not a Discord id")
+            elif (e := setting_error(f"workshop.scopes.{scope_id}", value)):
+                errors.append(e)
+        for where, ids in (("workshop.operators", w.operators), ("workshop.open_internet", w.open_internet)):
+            for v in ids:
+                if not _DISCORD_ID.match(v):
+                    errors.append(f"{where}: '{v}' is not a Discord id")
+        for host in w.allowlist:
+            if not _HOSTNAME.match(host):
+                errors.append(f"workshop.allowlist: '{host}' is not a host name "
+                              f"(no scheme, port, path or wildcard)")
         return errors
 
     # =========================================================================

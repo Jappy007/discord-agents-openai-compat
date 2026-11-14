@@ -114,6 +114,19 @@ api:
 mcp:
   enabled: false
 
+# ============================================================
+# WORKSHOP (0.15.0)
+# ============================================================
+# Linux VM (microsandbox) with a shell, an editor and filtered internet:
+# package downloads only, anything else needs your OK in a DM.
+workshop:
+  enabled: true                # false = no execution at all (hosts without virtualization)
+  default_setting: container   # container | off
+  scopes: {}                   # per-id override, e.g. {"123456789012345678": "off"}
+  operators: []                # who approves network requests; default: the app's owner
+  allowlist: []                # extra hosts every scope may download from
+  open_internet: []            # scope ids allowed any public host (still port 443 only)
+
 # Unified attachment system (images, documents, spreadsheets, code files)
 attachments:
   enabled: false

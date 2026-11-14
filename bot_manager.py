@@ -22,7 +22,7 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.config import BotConfig
+from core.config import BotConfig, START_BLOCKED_EXIT_CODE
 from core.rate_limiter import RateLimiter
 from core.message_memory import MessageMemory
 from core.memory_manager import MemoryManager
@@ -164,6 +164,20 @@ class BotManager:
             user_cache=user_cache,
         )
         logger.info("Reactive engine initialized")
+
+        # The workshop (0.14): sandboxes per scope, behind a test boot. A
+        # blocked start exits with its own code so the supervisor holds it
+        from core.workshop.gate import StartBlocked, open_workshop
+        skills_dir = Path(self.config.get_skills_config()["skills_dir"])
+        if not skills_dir.is_absolute() and not skills_dir.exists():
+            skills_dir = Path(__file__).resolve().parent / skills_dir
+        try:
+            reactive_engine.workshop = await open_workshop(
+                self.config, self.bot_id, root=Path(".").resolve(), vaults=reactive_engine.vaults,
+                db=self.message_memory._db, skills_dir=skills_dir)
+        except StartBlocked as e:
+            logger.error(f"[{self.bot_id}] Can't start: {e}")
+            sys.exit(START_BLOCKED_EXIT_CODE)
 
         # Initialize agentic engine if enabled (proactive actions)
         agentic_engine = None

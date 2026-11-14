@@ -178,6 +178,22 @@ class UnifiedAttachmentManager:
             }
         return None
 
+    async def local_bytes(self, attachment_id: str) -> Optional[bytes]:
+        """The stored bytes behind an attachment id, for callers that move
+        files between stores (the workshop inbox). None when the copy is gone."""
+        async with self.attachment_db.db.execute(
+            "SELECT local_path FROM attachments WHERE attachment_id = ?",
+            (attachment_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row or not row["local_path"] or not self.local_storage.exists(row["local_path"]):
+            return None
+        try:
+            return await self.local_storage.load(row["local_path"])
+        except Exception as e:
+            logger.warning(f"Couldn't read attachment {attachment_id}: {e}")
+            return None
+
     async def get_attachment_for_processing(self, attachment_id: str) -> Optional[Dict]:
         """
         Retrieve attachment data on demand.

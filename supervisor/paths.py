@@ -65,6 +65,15 @@ class SupervisorRoot:
     def api_token_file(self) -> Path:
         return self.persistence_dir() / "supervisor_token"
 
+    def workshop_dir(self, bot_id: str) -> Path:
+        """The bot's workshop files: status.json, state.json, panel.json,
+        requests/, workers/."""
+        return self.persistence_dir() / "workshop" / bot_id
+
+    def workshop_status(self, bot_id: str) -> Path:
+        """The bot's start-gate outcome (core/workshop/gate.py writes it)."""
+        return self.workshop_dir(bot_id) / "status.json"
+
     def memories_dir(self, bot_id: str) -> Path:
         return self.root / "memories" / bot_id
 

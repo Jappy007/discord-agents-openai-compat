@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import re
+import time
 import types
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -41,17 +42,30 @@ from .unified_attachment_manager import UnifiedAttachmentManager
 from .vaults import VaultEnforcer
 from .conversation_state_manager import ConversationStateManager
 from .skills import SkillCatalog
+from .workshop.notes import ProactiveLimits, ContextNoteWriter
+from .workshop.projects import CheckIns, ProjectBook, manifest as projects_manifest
+from .workshop.scopes import tree_of
+from .workshop.panel import Panel
+from .workshop.workers import Workers, copy_to_inbox
 from .internal_constants import (
     TOOL_STUB_KEEP_TURNS, PRIME_CONTEXT_TEMPLATE, format_size, model_max_output,
-    RECENT_MAP_MIN,
+    RECENT_MAP_MIN, WORKSHOP_DM_LINE, WORKSHOP_PROMPT, WORKSHOP_SHELF_LINE,
+    WORKSHOP_TURN_WALL_CLOCK_SECONDS,
 )
 from tools.discord_tools import DiscordToolExecutor, get_discord_tools
 from tools.skills_tool import run_request_skill, SKILL_READ_TOOL, SKILL_REQUEST_TOOL
+from tools.bash_tool import BASH_TOOL, run_bash
+from tools.editor_tool import EDITOR_NAME, EDITOR_SCHEMA, run_editor
+from tools.network_access_tool import NETWORK_ACCESS_TOOL, run_request_network_access
+from tools.delegate_tool import DELEGATE_TOOL
 from core.local_attachment_store import LocalAttachmentStore
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_LOOP_ITERATIONS = 10
+# Work in the workshop is steps (install, write, run, fix, run, send): its
+# turns get more room than an ordinary conversation turn.
+WORKSHOP_TOOL_LOOP_ITERATIONS = 25
 
 # A turn that may stay quiet says so with SILENT_REPLY. Models reaching for
 # it also write <silence/>, <silent> or </silent>: the whole reply being one
@@ -274,6 +288,16 @@ class ReactiveEngine:
         # ask_prime executor (v0.9) - constructed in on_ready (needs the client)
         self.ask_prime_executor = None
 
+        # The workshop (0.14): set by bot_manager when it runs; its job watcher
+        # starts in async_initialize, once conversation state exists
+        self.workshop = None
+        self.job_watcher = None
+        self.approvals = None      # network approvals, wired at boot (needs the client)
+        self.projects = None       # project notes (0.15.0), read where the workshop runs
+        self.workers = None        # delegated workers (0.15.0), with the job watcher
+        # Daily caps on unprompted turns, shared with the agentic engine
+        self.proactive_limits = ProactiveLimits(config)
+
         # Initialize v0.5.0 managers
         # MCP Manager
         self.mcp_manager = None
@@ -400,6 +424,34 @@ class ReactiveEngine:
                 logger.error(f"Failed to initialize UnifiedAttachmentManager: {e}", exc_info=True)
                 self.attachment_manager = None  # Disable on failure
                 self.repository_manager = None
+
+        if self.workshop is not None and self.conversation_state_manager:
+            from .workshop.watcher import JobWatcher
+            self.job_watcher = JobWatcher(
+                self.workshop,
+                ContextNoteWriter(self.conversation_state_manager, self.channel_locks),
+                wake=self.run_note_turn, config=self.config, events=self.message_memory)
+            self.workshop.on_background = self.job_watcher.follow
+            self.projects = ProjectBook(self.memory_tool_executor.base_path, self.config.bot_id,
+                                        self.vaults, self._channel_place)
+            self.workers = Workers(
+                workshop=self.workshop, config=self.config, memory=self.memory_tool_executor,
+                skills=self.skills, deliver=self.job_watcher.deliver,
+                transcripts=Path("persistence") / "workshop" / self.config.bot_id / "workers",
+                discord_tools=lambda: self.discord_tool_executor,
+                attachments=lambda: self.attachment_manager,
+                llm=self.llm, model=self.config.api.model)
+            checkins = CheckIns(self.projects, self.workshop,
+                                ContextNoteWriter(self.conversation_state_manager, self.channel_locks),
+                                self.job_watcher.request_turn, self.config, self.proactive_limits,
+                                events=self.message_memory)
+            self._track_task(asyncio.ensure_future(checkins.run()))
+            panel = Panel(self.workshop, Path("persistence") / "workshop" / self.config.bot_id,
+                          approvals=lambda: self.approvals)
+            self._track_task(asyncio.ensure_future(panel.run()))
+            # its own task: reconciling jobs (and their tails) talks to the
+            # runtime, which must never hold up the rest of on_ready
+            self._track_task(asyncio.ensure_future(self._start_watcher()))
 
     async def _initialize_conversation_from_db(
         self,
@@ -602,18 +654,21 @@ class ReactiveEngine:
                 notes.append(f"reply target {reply_to} not found - sent standalone")
 
         # Resolve requested attachments against files created by client-side
-        # tools (for example create_pptx) in the local output store.
+        # tools (for example create_pptx) in the local output store, then
+        # against the workshop's /workspace (0.14).
         outgoing_files = []
         matched_local = []
+        missing = []
         requested = tool_input.get("attach_outputs") or []
         if requested:
             for name in requested:
-                if not self.local_attachment_store.exists(name):
-                    notes.append(f"'{name}' was NOT found among the files created this turn - it was not attached")
-                elif name in loop_result.consumed_local_files:
-                    notes.append(f"'{name}' was already attached in this turn and is not re-attached")
+                if self.local_attachment_store.exists(name):
+                    if name in loop_result.consumed_local_files:
+                        notes.append(f"'{name}' was already attached in this turn and is not re-attached")
+                    else:
+                        matched_local.append(name)
                 else:
-                    matched_local.append(name)
+                    missing.append(name)
 
             for name in matched_local:
                 data = await self.local_attachment_store.load(name)
@@ -621,6 +676,13 @@ class ReactiveEngine:
                     outgoing_files.append(discord.File(io.BytesIO(data), filename=name))
                     notes.append(f"attached previously created file '{name}'")
                     loop_result.consumed_local_files.add(name)
+
+            if missing:
+                server_id = str(message.guild.id) if message.guild else None
+                files, file_notes = await self._workspace_attachments(
+                    missing, message, server_id, str(channel.id))
+                outgoing_files.extend(files)
+                notes.extend(file_notes)
 
 
         # Deliver, fragmented texting-style; files ride the first fragment
@@ -664,8 +726,14 @@ class ReactiveEngine:
             report += " Note: " + "; ".join(notes) + "."
         return report
 
-    def _build_attachment_tool_result(self, result, block_id, conversation_state):
-        """Convert a structured get_attachment result into a tool_result."""
+    async def _build_attachment_tool_result(self, result, block_id, conversation_state,
+                                            *, message=None, server_id=None, channel_id=None):
+        """Convert a structured get_attachment result into a tool_result.
+
+        Images inline. Any other file is offered as a local copy, and with the
+        workshop on it is also copied into /workspace/inbox so the model can
+        edit, convert or merge it there.
+        """
         content_blocks = [{"type": "text", "text": result["text"]}]
         file_data = result["file_data"]
 
@@ -682,8 +750,27 @@ class ReactiveEngine:
             content_blocks[0]["text"] += (
                 f"\nLocal copy: {file_data.get('data')}"
             )
+            if self._workshop_on(message):
+                content_blocks[0]["text"] += " " + await self._copy_to_inbox(
+                    result.get("metadata") or {}, message=message,
+                    server_id=server_id, channel_id=channel_id)
 
         return {"type": "tool_result", "tool_use_id": block_id, "content": content_blocks}, None
+
+    async def _copy_to_inbox(self, metadata: dict, *, message, server_id, channel_id) -> str:
+        """A fetched non-image file, as bytes, into /workspace/inbox (the
+        attachment's own vault check already ran in get_attachment)."""
+        from core.workshop.service import WorkshopUnavailable
+        if self.workshop is None or not self._workshop_on(message):
+            return ""
+        channel = getattr(message, "channel", None)
+        try:
+            scope = self.workshop.scope_for_turn(
+                server_id, channel_id, parent_id=getattr(channel, "parent_id", None),
+                is_thread=isinstance(channel, discord.Thread))
+        except WorkshopUnavailable as e:
+            return f"Couldn't put it in the workshop ({e})."
+        return await copy_to_inbox(self.workshop, self.attachment_manager, metadata, scope)
 
     # ========== SHARED RESPONSE PIPELINE ==========
 
@@ -769,6 +856,160 @@ class ReactiveEngine:
                 logger.info(f"Added {block['type']} block for {att['filename']}")
         return content, attachment_ids
 
+    # ------------------------------------------------------------------
+    # Workshop (0.14)
+    # ------------------------------------------------------------------
+
+    def _workshop_on(self, message) -> bool:
+        """Does this conversation's scope run the workshop (container setting)?"""
+        if getattr(self, "workshop", None) is None or message is None:
+            return False
+        channel = message.channel
+        server_id = str(message.guild.id) if message.guild else None
+        parent_id = getattr(channel, "parent_id", None)
+        scope = self.workshop.scope(server_id, str(channel.id), parent_id=parent_id,
+                                    is_thread=isinstance(channel, discord.Thread))
+        return self.workshop.setting(scope, server_id=server_id, channel_id=str(channel.id),
+                                     parent_id=parent_id) == "container"
+
+    def _channel_place(self, channel_id: str):
+        """(server id or None for a DM, thread parent, is_thread) of a channel
+        this bot can see right now, or None: how a project's home channel is
+        checked against the scope holding its note."""
+        if self.vaults.dm_partner_resolver and self.vaults.dm_partner_resolver(str(channel_id)):
+            return None, None, False
+        channel = self.discord_client.get_channel(int(channel_id)) if self.discord_client else None
+        if channel is None or isinstance(channel, discord.DMChannel):
+            return (None, None, False) if channel is not None else None
+        if isinstance(channel, discord.Thread):
+            return str(channel.guild.id), str(channel.parent_id), True
+        return str(channel.guild.id), None, False
+
+    def _projects_place(self, message):
+        """(scope, memory tree) of this conversation where its workshop runs."""
+        if not self._workshop_on(message):
+            return None
+        channel = message.channel
+        server_id = str(message.guild.id) if message.guild else None
+        parent_id = getattr(channel, "parent_id", None)
+        parent_id = str(parent_id) if parent_id else None
+        scope = self.workshop.scope(server_id, str(channel.id), parent_id=parent_id,
+                                    is_thread=isinstance(channel, discord.Thread))
+        return scope, tree_of(scope, server_id, str(channel.id), parent_id)
+
+    def _workspace_for(self, message, server_id, channel_id):
+        """This turn's /workspace (WorkspaceFiles), or None with the workshop off here."""
+        from core.workshop.service import WorkshopUnavailable, WorkspaceFiles
+        if self.workshop is None:
+            return None
+        channel = getattr(message, "channel", None)
+        try:
+            scope = self.workshop.scope_for_turn(
+                server_id, channel_id, parent_id=getattr(channel, "parent_id", None),
+                is_thread=isinstance(channel, discord.Thread))
+        except WorkshopUnavailable:
+            return None
+        return WorkspaceFiles(self.workshop, scope)
+
+    async def _workspace_attachments(self, paths: list, message, server_id, channel_id):
+        """(discord.File list, notes): workspace files read as bytes, checked
+        against Discord's size limit - the tool result says exactly what made it."""
+        from core.workshop.backend import FileTooLarge
+        workspace = self._workspace_for(message, server_id, channel_id)
+        if workspace is None:
+            return [], ["the workshop isn't running here, so nothing was attached"]
+        guild = getattr(message, "guild", None)
+        limit = getattr(guild, "filesize_limit", None) or 10 * 1024 * 1024
+        files, notes = [], []
+        for path in list(dict.fromkeys(paths))[:10]:
+            try:
+                data = await workspace.read(path, max_bytes=limit)
+            except FileNotFoundError:
+                notes.append(f"'{path}' doesn't exist in your workshop - it was not attached")
+                continue
+            except FileTooLarge as e:
+                notes.append(f"'{path}' is {format_size(e.size)}, over Discord's "
+                             f"{format_size(limit)} limit here - it was not attached")
+                continue
+            except Exception as e:
+                logger.warning(f"attaching {path} failed: {e!r}")
+                notes.append(f"'{path}' couldn't be read ({e}) - it was not attached")
+                continue
+            files.append(discord.File(io.BytesIO(data), filename=path.rsplit("/", 1)[-1]))
+        return files, notes
+
+    async def _workshop_awareness(self, message) -> str:
+        """One line per job running in this conversation's workshop scope."""
+        channel = message.channel
+        server_id = str(message.guild.id) if message.guild else None
+        parent_id = getattr(channel, "parent_id", None)
+        scope = self.workshop.scope(server_id, str(channel.id), parent_id=parent_id,
+                                    is_thread=isinstance(channel, discord.Thread))
+        if scope is None or not self._workshop_on(message):
+            return ""
+        jobs = await self.workshop.jobs.running(scope.key)
+        if not jobs:
+            return ""
+        lines = []
+        for job in jobs:
+            what = f"helper working on: {job.command[:80]}" if job.kind == "worker" else job.command[:80]
+            if job.kind == "shell" and job.executor_key.startswith("worker:"):
+                what += f" (started by helper {job.executor_key[len('worker:'):]}, not you)"
+            lines.append(f"- {job.id}: {what}")
+        return ("<workshop_jobs>\n(running in your workshop; a note arrives when each finishes)\n"
+                + "\n".join(lines) + "\n</workshop_jobs>")
+
+    async def _workshop_tool(self, block, call) -> dict:
+        """A workshop tool's result, whatever happens in it: an unexpected
+        error is the model's to see (and the log's), never a crashed turn."""
+        if self.workshop is None:
+            content, error = "The workshop isn't available here.", False
+        else:
+            try:
+                content, error = await call(), False
+            except Exception as e:
+                logger.error(f"{block.name} failed unexpectedly: {e!r}", exc_info=True)
+                content, error = (f"{block.name} hit an unexpected error ({type(e).__name__}: {e}). "
+                                  f"Trying a different way may work; if it keeps happening, say so."), True
+        result = {"type": "tool_result", "tool_use_id": block.id, "content": content}
+        if error:
+            result["is_error"] = True
+        return result
+
+    @staticmethod
+    async def _no_workers() -> str:
+        return "Delegating isn't available right now."
+
+    async def _start_watcher(self) -> None:
+        try:
+            await self.job_watcher.start()
+        except Exception:
+            logger.exception("the job watcher couldn't settle jobs at boot")
+
+    async def run_note_turn(self, channel_id: str) -> None:
+        """A may-stay-silent turn about a persisted note (a finished job, an
+        approval) rather than a message. The carrier is the channel's real
+        latest message, so guild, ids and DM detection are real."""
+        if not self.discord_client:
+            return
+        channel = self.discord_client.get_channel(int(channel_id))
+        if channel is None:
+            try:
+                channel = await self.discord_client.fetch_channel(int(channel_id))
+            except discord.HTTPException as e:
+                logger.warning(f"Note-driven turn: channel {channel_id} unavailable ({e})")
+                return
+        latest = None
+        async for m in channel.history(limit=1):
+            latest = m
+        if latest is None:
+            logger.warning(f"Note-driven turn: no message to anchor in {channel_id}")
+            return
+        context = await self.context_builder.build_context(latest)
+        context["conversation_momentum"] = await self._calculate_conversation_momentum(channel_id)
+        await self._call_model_for_response_decision(
+            latest, context, [{"user": "workshop", "text": "a note arrived", "addressed": False}])
+
     async def _build_volatile_tail(self, base: str, conversation_state, message=None) -> str:
         """
         Per-request context (timestamp, momentum, attachment index, repository
@@ -810,6 +1051,25 @@ class ReactiveEngine:
                     parts.append(repo_manifest)
             except Exception as e:
                 logger.error(f"Failed to generate repository manifest: {e}", exc_info=True)
+
+        if getattr(self, "workshop", None) is not None and message is not None:
+            try:
+                awareness = await self._workshop_awareness(message)
+                if awareness:
+                    parts.append(awareness)
+            except Exception as e:
+                logger.error(f"Failed to build workshop awareness line: {e}")
+
+        if getattr(self, "projects", None) is not None and message is not None:
+            try:
+                place = self._projects_place(message)
+                if place:
+                    listed = projects_manifest(self.projects.in_scope(*place),
+                                               f"/memories/{self.config.bot_id}/{place[1]}")
+                    if listed:
+                        parts.append(listed)
+            except Exception as e:
+                logger.error(f"Failed to build projects manifest: {e}")
 
         # Recent message ids (v0.12.0): send_message reply_to targets. The
         # model can't anchor a reply to a message it can't name; ids ride
@@ -861,7 +1121,7 @@ class ReactiveEngine:
         )
 
     def _build_api_params(self, system_blocks: list, conversation_state, context,
-                          is_dm: bool = False) -> dict:
+                          is_dm: bool = False, message=None) -> dict:
         """
         Assemble the chat request shared by both response paths: tool
         registry and message history.
@@ -872,15 +1132,32 @@ class ReactiveEngine:
         from .memory_tool_executor import MEMORY_TOOL_SCHEMA
         tools = [MEMORY_TOOL_SCHEMA]
 
+        workshop = self._workshop_on(message)
+        repository = self.repository_manager is not None and not is_dm
+        if workshop and system_blocks:
+            place = WORKSHOP_DM_LINE if is_dm else WORKSHOP_SHELF_LINE if repository else ""
+            projects_place = self._projects_place(message)
+            projects = (f"/memories/{self.config.bot_id}/{projects_place[1]}/projects"
+                        if projects_place else f"/memories/{self.config.bot_id}/projects")
+            system_blocks[0]["text"] += "\n\n" + WORKSHOP_PROMPT.format(
+                place=place, projects=projects)
+
         # Skills (0.14): the catalog joins the cached system prefix; only
         # text-only skills are offered without a workshop. The list is stable
         # per bot, so it belongs in the cached system block, not the tail.
-        workshop = False
         skills_prompt = self.skills.prompt(workshop=workshop)
         if skills_prompt and system_blocks:
             system_blocks[0]["text"] += "\n\n" + skills_prompt
         if skills_prompt:
             tools.append(SKILL_REQUEST_TOOL if workshop else SKILL_READ_TOOL)
+
+        if workshop:
+            tools.append(BASH_TOOL)
+            tools.append({"name": EDITOR_NAME,
+                          "description": "View and edit files in your workshop.",
+                          "input_schema": EDITOR_SCHEMA})
+            tools.append(NETWORK_ACCESS_TOOL)
+            tools.append(DELEGATE_TOOL)
 
         if self.discord_tool_executor:
             tools.extend(get_discord_tools())
@@ -1038,6 +1315,9 @@ class ReactiveEngine:
         """
         channel_id = str(message.channel.id)
         server_id = str(message.guild.id) if message.guild else None
+        parent_id = getattr(message.channel, "parent_id", None)
+        parent_id = str(parent_id) if parent_id else None
+        is_thread = isinstance(message.channel, discord.Thread)
 
         tool_results = []
         pending_file_blocks = []
@@ -1088,8 +1368,9 @@ class ReactiveEngine:
                     )
                     # Structured data from get_attachment
                     if isinstance(result, dict) and result.get("_structured"):
-                        tool_result, file_block = self._build_attachment_tool_result(
-                            result, block.id, conversation_state
+                        tool_result, file_block = await self._build_attachment_tool_result(
+                            result, block.id, conversation_state,
+                            message=message, server_id=server_id, channel_id=channel_id
                         )
                         tool_results.append(tool_result)
                         if file_block:
@@ -1117,6 +1398,32 @@ class ReactiveEngine:
                     "tool_use_id": block.id,
                     "content": result
                 })
+
+            # The workshop (0.14) - MUST precede the MCP "_" fallthrough
+            # (str_replace_based_edit_tool and request_network_access hold
+            # underscores). Each runs the workshop's own gate first.
+            elif block.name in ("bash", EDITOR_NAME, "request_network_access"):
+                runner, label, detail = {
+                    "bash": (run_bash, "bash", (block.input.get("command") or "")[:120]),
+                    EDITOR_NAME: (run_editor, block.input.get("command", "edit"),
+                                  block.input.get("path", "")),
+                    "request_network_access": (
+                        lambda workshop, tool_input, **kw: run_request_network_access(
+                            self.approvals, workshop, tool_input, **kw),
+                        "request_network_access", block.input.get("host", "")),
+                }[block.name]
+                note("workshop", label, detail)
+                tool_results.append(await self._workshop_tool(
+                    block, lambda: runner(self.workshop, block.input, server_id=server_id,
+                                          channel_id=channel_id, parent_id=parent_id,
+                                          is_thread=is_thread)))
+
+            elif block.name == "delegate":
+                note("workshop", "delegate", (block.input.get("task") or "")[:120])
+                tool_results.append(await self._workshop_tool(block, lambda: (
+                    self.workers.delegate(block.input, server_id=server_id, channel_id=channel_id,
+                                          parent_id=parent_id, is_thread=is_thread)
+                    if self.workers is not None else self._no_workers())))
 
             # ask_prime (v0.9) - MUST precede the MCP "_" fallthrough
             elif block.name == "ask_prime":
@@ -1156,7 +1463,8 @@ class ReactiveEngine:
             elif block.name == "request_skill":
                 logger.info(f"Executing request_skill tool: {block.input.get('skill_name', 'unknown')}")
                 note("skills", "request_skill", block.input.get("skill_name", ""))
-                result = run_request_skill(self.skills, block.input, workshop=False)
+                result = run_request_skill(
+                    self.skills, block.input, workshop=self._workshop_on(message))
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -1299,6 +1607,11 @@ class ReactiveEngine:
         """
         result = ToolLoopResult()
         loop_iteration = 0
+        started = time.monotonic()
+        workshop_turn = any(
+            (t.get("name") or t.get("type")) == "bash"
+            for t in (api_params.get("tools") or []))
+        cap = WORKSHOP_TOOL_LOOP_ITERATIONS if workshop_turn else MAX_TOOL_LOOP_ITERATIONS
         # web_fetch provenance (0.15.0): URLs from user turns (never tool
         # results) plus web_search results as they happen this turn.
         from tools.client_web_tools import allowed_urls_from_messages, urls_in_text
@@ -1344,11 +1657,20 @@ class ReactiveEngine:
 
             if response.stop_reason == "tool_use":
                 # Safety cap: a model that keeps requesting tools must not loop unbounded
-                if loop_iteration >= MAX_TOOL_LOOP_ITERATIONS:
-                    logger.warning(f"Tool use loop exceeded {MAX_TOOL_LOOP_ITERATIONS} iterations{log_suffix}")
+                if loop_iteration >= cap:
+                    logger.warning(f"Tool use loop exceeded {cap} iterations{log_suffix}")
                     if (fallback_text and not result.did_send
                             and not result.stayed_silent and not result.reaction_used):
                         result.response_text = result.response_text or "I got stuck in a tool loop - try asking again."
+                    break
+                # Turn wall clock (spec 7.1): no new model calls past it; the
+                # workshop's commands carry on as jobs and report back
+                if time.monotonic() - started >= WORKSHOP_TURN_WALL_CLOCK_SECONDS:
+                    logger.warning(f"Turn wall clock reached{log_suffix} - ending the turn")
+                    if fallback_text and not result.did_send:
+                        result.response_text = result.response_text or (
+                            "That's taking longer than one go allows - anything still running "
+                            "keeps going in the workshop, and I'll pick it up when it reports back.")
                     break
                 result.tools_were_used = True
 
@@ -1464,7 +1786,7 @@ class ReactiveEngine:
                 # - sending WAS the response)
                 if (not result.response_text.strip() and result.tools_were_used
                         and not result.did_send
-                        and loop_iteration < MAX_TOOL_LOOP_ITERATIONS):
+                        and loop_iteration < cap):
                     logger.warning(f"Tools used but no text response{log_suffix} - reprompting (iteration {loop_iteration})")
                     api_params["messages"].append({"role": "assistant", "content": response.content})
                     api_params["messages"].append({
@@ -1483,7 +1805,7 @@ class ReactiveEngine:
                         and re.search(r"\battach(?:ed|ment|ments|ing)?\b",
                                       result.response_text, re.IGNORECASE)):
                     if (attachment_nudges < 2
-                            and loop_iteration < MAX_TOOL_LOOP_ITERATIONS):
+                            and loop_iteration < cap):
                         if attachment_nudges == 0:
                             note_text = (
                                 "<system_note>Your reply mentions an attached file, "
@@ -1807,7 +2129,7 @@ class ReactiveEngine:
 
                     api_params = self._build_api_params(
                         system_blocks, conversation_state, context,
-                        is_dm=message.guild is None)
+                        is_dm=message.guild is None, message=message)
                     # Usage recorded later must match the session we measured
                     seed_epoch = conversation_state.seed_epoch if conversation_state else 0
 
@@ -1978,7 +2300,8 @@ class ReactiveEngine:
                     context.get("time_context", ""), conversation_state, synthetic)
 
                 api_params = self._build_api_params(
-                    system_blocks, conversation_state, context, is_dm=True)
+                    system_blocks, conversation_state, context, is_dm=True,
+                    message=synthetic)
                 seed_epoch = conversation_state.seed_epoch if conversation_state else 0
 
                 result = await self._run_tool_loop(
@@ -2143,6 +2466,15 @@ class ReactiveEngine:
             
             # Clear the set
             self._background_tasks.clear()
+
+        # The workshop's own tasks, before the states they write close. Its
+        # sandboxes stay up: jobs survive a restart, idle ones stop themselves
+        for part in (self.workers, self.approvals, self.job_watcher, self.workshop):
+            if part is not None:
+                try:
+                    await part.close()
+                except Exception as e:
+                    logger.error(f"Error closing {type(part).__name__}: {e}")
 
         # Cleanup v0.5.0 managers
         if self.mcp_manager:
@@ -2483,7 +2815,7 @@ class ReactiveEngine:
 
             api_params = self._build_api_params(
                 system_blocks, conversation_state, context,
-                is_dm=message.guild is None)
+                is_dm=message.guild is None, message=message)
             # Usage recorded later must match the session we measured
             seed_epoch = conversation_state.seed_epoch if conversation_state else 0
 

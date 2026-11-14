@@ -18,12 +18,15 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from core.config import START_BLOCKED_EXIT_CODE
+
 from .paths import SupervisorRoot
 
 logger = logging.getLogger(__name__)
 
 CRASH_RETRY_CAP_PER_HOUR = 5
 BACKOFF_BASE_SECONDS = 60  # 1, 2, 4, 8, 16 minutes
+BLOCKED_RETRY_SECONDS = 600
 STOP_TIMEOUT_SECONDS = 15  # clean-stop window before killing a bot
 
 
@@ -98,6 +101,7 @@ class ProcessManager:
         self._crash_times: Dict[str, List[float]] = {}
         self._next_retry: Dict[str, float] = {}
         self._crashed: Dict[str, bool] = {}      # gave up until operator start
+        self._blocked: Dict[str, bool] = {}      # start gate refused; until operator start
         self._desired: List[str] = self._load_desired()
 
     # --- spawning ---------------------------------------------------------
@@ -149,6 +153,7 @@ class ProcessManager:
             "uptime_s": int(time.monotonic() - self._started_at[bot_id])
             if running and bot_id in self._started_at else 0,
             "crashed": self._crashed.get(bot_id, False),
+            "blocked": self._blocked.get(bot_id, False),
         }
 
     # --- lifecycle ------------------------------------------------------------
@@ -169,6 +174,7 @@ class ProcessManager:
             self.root.running_flag(bot_id).unlink(missing_ok=True)
             await asyncio.sleep(1.0)
         self._crashed.pop(bot_id, None)
+        self._blocked.pop(bot_id, None)
         self._crash_times.pop(bot_id, None)
         self._next_retry.pop(bot_id, None)
         proc = await self._spawner(bot_id)
@@ -236,8 +242,23 @@ class ProcessManager:
         for bot_id in list(self._desired):
             proc = self._procs.get(bot_id)
             if proc is None or proc.returncode is None:
+                if proc is not None:
+                    self._blocked.pop(bot_id, None)   # a retry got past its start gate
                 continue  # never started here, or still alive
             if self._crashed.get(bot_id):
+                continue
+            if proc.returncode == START_BLOCKED_EXIT_CODE:
+                if not self._blocked.get(bot_id):
+                    logger.error(f"{bot_id} can't start (its workshop is blocked) - "
+                                 f"retrying every {BLOCKED_RETRY_SECONDS // 60} minutes")
+                    self._blocked[bot_id] = True
+                    self._next_retry[bot_id] = now + BLOCKED_RETRY_SECONDS
+                    continue
+                if now < self._next_retry.get(bot_id, 0):
+                    continue
+                self._next_retry[bot_id] = now + BLOCKED_RETRY_SECONDS
+                self._procs[bot_id] = await self._spawner(bot_id)   # not a crash: no backoff count
+                self._started_at[bot_id] = now
                 continue
             if now < self._next_retry.get(bot_id, 0):
                 continue

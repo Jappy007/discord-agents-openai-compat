@@ -64,14 +64,47 @@ Legend: [ ] pending · [~] in progress · [x] done
 - [x] 7.3 Copy text-only skills
 - [x] 7.4 Bundle `skills/`
 
-> Fork note: upstream v0.15.7 unmarks the two fiction guides (their bodies read
-> workshop reference files). This fork has no workshop, so they are marked
-> `text-only: true` to keep the plan's "work today" behaviour; the other four
-> skill folders remain workshop-only.
+> Fork note: upstream v0.15.7 leaves the two fiction guides workshop-only.
+> This fork marks them `text-only: true` so they keep working where no workshop
+> is configured (Phase 8 now provides the workshop, but the fallback is still
+> useful on hosts without virtualization); the other four skill folders remain
+> workshop-only.
 
 ## Phase 8 — Workshop sandbox (optional)
 
-- [ ] Skipped for now (large, separate epic)
+- [x] 8.1 Dependency/runtime: `microsandbox==0.7.8`, bundle smoke imports
+- [x] 8.2 Core workshop modules (`scopes`, `state`, `backend`, `service`,
+      `jobs`, `notes`, `approvals`, `proxy`, `watcher`, `panel`, `projects`,
+      `workers`) plus `backends/{fake,microsandbox}.py`
+- [x] 8.3 `bash` + editor tools, dispatch in `_execute_tool_blocks`, 25-step
+      workshop turn cap and 20-minute turn wall clock
+- [x] 8.4 Long jobs: jobs table, `JobWatcher`, completion notes and quiet
+      turns, boot reconciliation
+- [x] 8.5 Network approvals: egress proxy, rotating per-scope credentials,
+      `request_network_access`, operator DMs + dashboard decisions
+- [x] 8.6 Start gate: test boot before login, `status.json`, exit code 78,
+      supervisor blocked state + 10-minute retry, `workshop.enabled: false`
+- [x] 8.7 Dashboard Workshop tab: status/disk per scope, reset/wipe, pending
+      approvals, jobs and helper transcripts; read-only supervisor routes
+- [x] 8.8 Attachments: `/workspace` paths in `send_message`; fetched files
+      copied into `/workspace/inbox`
+- [x] 8.9 Projects and check-ins (`projects.py`, hourly tick, manifest in the
+      volatile tail)
+- [x] 8.10 Helpers: `delegate` tool, `workers.py`, restricted tools, budgets,
+      step/time caps
+- [x] 8.11 Regression tests (`tests/test_workshop_phase8.py`) on `FakeBackend`
+- [x] 8.12 Operator Stop stops this install's sandboxes (`supervisor/sandboxes.py`)
+
+> Fork adaptations: `core/workshop/workers.py` calls the fork's
+> `llm.beta.messages.stream()` instead of `core/model/driver`; tool schemas are
+> built from the fork's internal shapes. Worker model routing uses `api.model`
+> until Phase 9 adds `api.worker_model`. The supervisor never imports bot code;
+> `VaultEnforcer.resolve_scope` was ported from upstream for scopes.
+>
+> Not exercised here: the real Microsandbox backend needs a Linux VM runtime.
+> Tests drive the same paths through `FakeBackend`; production uses
+> `MicrosandboxBackend`. The dashboard skills-management UI upstream added in
+> 0.14 is still absent (skills are configured in YAML).
 
 ## Phase 9 — Model roles and optional OpenAI layer
 

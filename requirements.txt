@@ -17,6 +17,9 @@ openpyxl==3.1.5
 python-docx==1.2.0
 python-pptx==1.0.2
 
+# Workshop sandbox runtime (Phase 8)
+microsandbox==0.7.8
+
 # Testing
 pytest==9.1.1
 pytest-asyncio==1.4.0

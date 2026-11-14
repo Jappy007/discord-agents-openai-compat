@@ -349,3 +349,107 @@ WEB_SEARCH_DISABLED_PROMPT = """
 You cannot search the web. Work from your training knowledge and be clear about uncertainty.
 """
 
+
+# =============================================================================
+# WORKSHOP PROMPT (0.14, spec 5.7)
+# =============================================================================
+# Joins the cached system prefix where the conversation's scope runs the
+# workshop. Low-key on purpose: a bench the bot may use, not a job it has.
+WORKSHOP_PROMPT = """<workshop>
+You have a workshop here: a small Linux machine of your own, there when it's useful and easy to forget when it isn't. Think of it as your bench. /workspace keeps whatever you leave on it between conversations, files people share land in /workspace/inbox when you fetch them, and send_message's attach_outputs hands anything on it over to the channel.{place}
+When something will take a while, people usually say so before they start.
+Something that runs over days can be a project: a note at {projects}/<name>.md that opens with frontmatter between --- lines (status: active, paused or done; next_check: a date), with its files in /workspace/projects/<name>/. When next_check comes round you get a quiet moment to look in on it.
+</workshop>"""
+WORKSHOP_SHELF_LINE = (" The repository is your shelf: what the server should keep, where people can"
+                       " find it without you, goes there with save_output.")
+WORKSHOP_DM_LINE = " This one belongs to this DM alone."
+
+# A worker's prompt (spec 7.2): short and about the task. It never speaks in
+# Discord; its last reply is a report the resident reads and passes on.
+WORKER_PROMPT = """You're a helper doing one piece of work for {name}, who's part of a Discord community and handed it to you. You work out of sight: what you write at the end is your report to {name}, who passes on whatever matters.
+
+You work in {name}'s workshop, a small Linux machine (Debian, Python 3.12, Node 24, git, ffmpeg). Its /workspace is shared with {name}; your shell is your own. The internet reaches package downloads only{web}. You can read {name}'s memory under /memories/{bot_id} and look through the community's messages and files with discord_tools. You can't write memory, send messages or ask for network access: if the work needs a host opened, say so in your report.
+
+Work until the task is done or you're stuck, then reply without calling a tool. Your report: what you did, what you found, where any files are, and what's left open. Today is {date}."""
+WORKER_WEB_LINE = ", and you have web search and fetch"
+WORKER_BUDGET_NOTE = (
+    "That's the end of your budget ({why}). Don't call any more tools: reply now with your "
+    "report - what you did, what you found, where any files are, and what's left.")
+
+# How a turn that may stay quiet says so. Asked to write nothing, models
+# write about writing nothing instead, and that gets posted. Measured on
+# captured requests, 8 runs per cell: a note-driven turn (a finished job, an
+# expired approval) posted an explanation 8/8 with no line, 0/8 with
+# NOTE_TURN_LINE, while a promised report still went out 8/8 (2026-10-20); a
+# scan of a person's message meant for someone else posted "*silence*" or
+# "*not addressed to me*" 16/16 under "output nothing" and 0/16 with this
+# sentinel, counting its near-miss `<silence/>` (2026-10-21, 0.15.3), while a
+# direct question still got its answer 8/8. Models emit a token far more
+# reliably than nothing.
+SILENT_REPLY = "<silent/>"
+
+# The <recent_messages> map on the request tail is the only place the model
+# learns who said what: conversation turns are the bare message text. It
+# covers at least this many messages, and as many as the conversation can
+# hold (api.context_messages). Measured 2026-10-22 on a captured scan, 8 runs
+# per arm: asked who said something 23 messages back, a 15-line map got it
+# right 1/8 (7/8 confidently named the wrong person), a map covering the
+# whole conversation 8/8. "Name: " on every turn also got 8/8, but then
+# answered a follow-up meant for another bot 8/8, against 0/8 (0.15.4)
+RECENT_MAP_MIN = 15
+
+# Two bots that each answer the other never stop on their own (seen live
+# 2026-10-21: SLH-Alpha and SLH-01 traded "*silence*" once a minute until
+# one was stopped). Past this many bot messages in a row in a channel,
+# another bot's unaddressed message gets no scan until a person speaks; an
+# explicit @mention from a bot is still answered (0.15.2)
+BOT_CHAIN_LIMIT = 6
+
+# Project check-ins (0.15.0, spec 6): the tick's first run after boot, then hourly
+PROJECT_CHECK_FIRST_SECONDS = 60
+PROJECT_CHECK_SECONDS = 3600
+NOTE_TURN_LINE = (
+    "This turn started because of the note above, not because anyone spoke, and anything "
+    "you write is posted to the channel. If someone is waiting on what the note says "
+    "(you said you'd report back, or it answers their request), tell them. If it needs "
+    f"nothing said, reply with exactly {SILENT_REPLY} and nothing else.")
+
+
+# =============================================================================
+# WORKSHOP (0.14, spec 5.10 - internal, tunable)
+# =============================================================================
+WORKSHOP_IMAGE = "python:3.12-slim-bookworm"
+WORKSHOP_GUEST_CPUS = 2
+WORKSHOP_GUEST_MEMORY_MIB = 2048
+WORKSHOP_VOLUME_MIB = 10240            # /workspace, a fixed-size disk volume
+WORKSHOP_ROOT_DISK_MIB = 10240         # the root filesystem cap
+WORKSHOP_FREE_SPACE_FLOOR_BYTES = 5 * 1024**3   # refuse new work below this on the host drive
+WORKSHOP_IDLE_STOP_SECONDS = 30 * 60   # the runtime's idle_timeout; running jobs count as activity
+WORKSHOP_RUNNING_SANDBOXES = 4         # per bot, least recently used stopped first
+WORKSHOP_COMMIT_PER_SANDBOX_BYTES = int(2.5 * 1024**3)  # V7: ~guest memory + overhead
+WORKSHOP_BACKGROUND_PER_SCOPE = 3      # background jobs + workers, combined
+WORKSHOP_FOREGROUND_CEILING_SECONDS = 180   # then the command becomes a job
+WORKSHOP_TURN_WALL_CLOCK_SECONDS = 20 * 60
+WORKSHOP_SHELL_JOB_MAX_SECONDS = 6 * 3600
+WORKSHOP_TOOL_OUTPUT_CHARS = 30_000    # head + tail beyond this; the full log stays in the workspace
+WORKSHOP_APPROVAL_EXPIRY_HOURS = 24
+# Workers (spec 7.2): either budget ends one with a partial report
+WORKER_CALL_SLOTS = 2
+WORKER_MAX_ITERATIONS = 40
+WORKER_MAX_SECONDS = 60 * 60
+WORKER_COMMAND_CEILING_SECONDS = 20 * 60   # a worker waits longer on a command than a turn does
+WORKER_REPORT_CHARS = 6000                 # what the completion note carries
+WORKSHOP_PENDING_APPROVALS_PER_SCOPE = 5
+
+# Egress (spec 5.6): exact host names, CONNECT to port 443 only
+WORKSHOP_DOWNLOAD_PRESET = (
+    "pypi.org", "files.pythonhosted.org", "codeload.github.com",
+    "objects.githubusercontent.com", "deb.debian.org", "security.debian.org",
+)
+# Template provisioning only (one-shot credential, never a scope's)
+WORKSHOP_PROVISIONING_ALLOWLIST = (
+    "deb.debian.org", "nodejs.org", "pypi.org", "files.pythonhosted.org",
+)
+WORKSHOP_PROXY_HEAD_LIMIT = 8192        # request head bytes
+WORKSHOP_PROXY_HANDSHAKE_SECONDS = 15   # request head, ClientHello, upstream connect
+WORKSHOP_PROXY_IDLE_SECONDS = 600       # a tunnel with no traffic either way closes
